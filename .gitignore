@@ -1,0 +1,58 @@
+## .NET
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+*.user
+*.suo
+*.userprefs
+.vs/
+.vscode/*
+!.vscode/extensions.json
+project.lock.json
+artifacts/
+TestResults/
+*.coverage
+*.trx
+
+## Secrets & local config
+appsettings.Development.json
+appsettings.Local.json
+appsettings.json
+!appsettings.Example.json
+.env
+.env.*
+!.env.example
+*.pfx
+*.key
+
+## Rider / JetBrains
+.idea/
+
+## OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+## Load test output
+loadtest/results/
+*.k6-summary.json
+
+## Terraform (AWS time-boxed exercise, plan §4)
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+
+## Planning docs — kept local for now, see note in README history.
+## Publishing the build plan on day 1 shows a reviewer the bugs were staged.
+## Flip these three lines at Phase 07 if you want the plan public as a build log.
+docs/labqueue-implementation-plan.md
+docs/handoffs/
+
+## Claude Code
+.claude/
+CLAUDE.md
