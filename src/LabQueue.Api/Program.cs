@@ -84,6 +84,7 @@ app.MapGet("/health", () => Results.Ok(new { status = "ok" }))
 app.MapAuthEndpoints();
 app.MapResourceEndpoints();
 app.MapReservationEndpoints();
+app.MapAdminEndpoints();
 
 app.Run();
 
