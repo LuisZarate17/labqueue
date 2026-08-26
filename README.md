@@ -35,8 +35,8 @@ query plans committed alongside the code.
 
 | Phase | |
 |---|---|
-| 01 — Domain model & migrations | ⬜ |
-| 02 — API & auth | ⬜ |
+| 01 — Domain model & migrations | ✅ |
+| 02 — API & auth | ✅ |
 | 03 — Tests & CI | ⬜ |
 | 04 — Containerize & deploy | ⬜ |
 | 05 — Observability | ⬜ |

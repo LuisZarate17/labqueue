@@ -45,3 +45,34 @@ SELECT * FROM reservations
 WHERE resource_id = md5('labqueue:resource:100')::uuid
   AND status = 'confirmed'
   AND during && tstzrange(TIMESTAMPTZ '2026-06-01 00:00:00+00', TIMESTAMPTZ '2026-06-08 00:00:00+00', '[)');
+
+-- ---------------------------------------------------------------------------
+-- The same query in the form the application actually sends it.
+--
+-- EF Core emits the statement below with bind parameters, not literals. The
+-- column list is every column on the table, so it is "SELECT *" in all but
+-- spelling. Explaining only the literal form above would describe a query the
+-- application never runs, and would miss any custom-vs-generic plan difference.
+-- ---------------------------------------------------------------------------
+
+PREPARE availability (uuid, tstzrange) AS
+SELECT r.id, r.cancelled_at, r.created_at, r.during, r.resource_id, r.status, r.user_id
+FROM reservations AS r
+WHERE r.resource_id = $1 AND r.status = 'confirmed' AND r.during && $2;
+
+\echo ''
+\echo '=== EXPLAIN — EF Core statement, custom plan ==='
+SET plan_cache_mode = force_custom_plan;
+EXPLAIN (ANALYZE, BUFFERS) EXECUTE availability(
+  md5('labqueue:resource:100')::uuid,
+  tstzrange(TIMESTAMPTZ '2026-06-01 00:00:00+00', TIMESTAMPTZ '2026-06-08 00:00:00+00', '[)'));
+
+\echo ''
+\echo '=== EXPLAIN — EF Core statement, generic plan ==='
+SET plan_cache_mode = force_generic_plan;
+EXPLAIN (ANALYZE, BUFFERS) EXECUTE availability(
+  md5('labqueue:resource:100')::uuid,
+  tstzrange(TIMESTAMPTZ '2026-06-01 00:00:00+00', TIMESTAMPTZ '2026-06-08 00:00:00+00', '[)'));
+
+RESET plan_cache_mode;
+DEALLOCATE availability;
