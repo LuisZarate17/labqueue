@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/LabQueue.Api/LabQueue.Api.csproj" />
+    <Project Path="src/LabQueue.Core/LabQueue.Core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/LabQueue.Tests/LabQueue.Tests.csproj" />
+  </Folder>
+</Solution>

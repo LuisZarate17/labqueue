@@ -21,6 +21,7 @@ TestResults/
 appsettings.Development.json
 appsettings.Local.json
 appsettings.json
+!src/LabQueue.Api/appsettings.json
 !appsettings.Example.json
 .env
 .env.*
@@ -47,9 +48,10 @@ loadtest/results/
 *.tfvars
 !*.tfvars.example
 
-## Planning docs — kept local for now, see note in README history.
-## Publishing the build plan on day 1 shows a reviewer the bugs were staged.
-## Flip these three lines at Phase 07 if you want the plan public as a build log.
+## Planning docs
+## Kept local: the plan is internal strategy, not documentation. It names the resume
+## goals and the reviewer-facing reasoning outright, which reads badly published verbatim.
+## Honesty about the constructed bugs belongs in README.md instead — see plan §1.4.
 docs/labqueue-implementation-plan.md
 docs/handoffs/
 

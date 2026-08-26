@@ -1,0 +1,15 @@
+# Normalise to LF in the repository and in the working tree. CI runs on
+# ubuntu-latest and the seed SQL is mounted into a Linux container, so CRLF
+# would travel where it is not wanted.
+* text=auto eol=lf
+
+# Windows-only tooling that wants CRLF.
+*.ps1  text eol=crlf
+*.cmd  text eol=crlf
+*.bat  text eol=crlf
+
+# Binaries.
+*.png  binary
+*.jpg  binary
+*.gif  binary
+*.pdf  binary
