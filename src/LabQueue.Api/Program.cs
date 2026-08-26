@@ -4,6 +4,7 @@ using LabQueue.Api.Auth;
 using LabQueue.Api.Endpoints;
 using LabQueue.Api.Infrastructure;
 using LabQueue.Core.Data;
+using LabQueue.Core.Services;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
@@ -22,6 +23,7 @@ builder.Services.AddDbContext<LabQueueDbContext>(options =>
 builder.Services.Configure<JwtOptions>(builder.Configuration.GetSection(JwtOptions.SectionName));
 builder.Services.AddSingleton<PasswordHashing>();
 builder.Services.AddSingleton<JwtTokenService>();
+builder.Services.AddScoped<ReservationService>();
 builder.Services.AddValidatorsFromAssemblyContaining<Program>();
 
 var jwt = builder.Configuration.GetSection(JwtOptions.SectionName).Get<JwtOptions>() ?? new JwtOptions();
@@ -81,6 +83,7 @@ app.MapGet("/health", () => Results.Ok(new { status = "ok" }))
 
 app.MapAuthEndpoints();
 app.MapResourceEndpoints();
+app.MapReservationEndpoints();
 
 app.Run();
 
