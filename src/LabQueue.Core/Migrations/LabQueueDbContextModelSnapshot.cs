@@ -85,6 +85,8 @@ namespace LabQueue.Core.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("ResourceId");
+
                     b.ToTable("maintenance_windows", null, t =>
                         {
                             t.HasCheckConstraint("maintenance_windows_during_bounds", "NOT isempty(during) AND lower_inc(during) AND NOT upper_inc(during)");
@@ -126,6 +128,10 @@ namespace LabQueue.Core.Migrations
                         .HasColumnName("user_id");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("ResourceId");
+
+                    b.HasIndex("UserId");
 
                     b.ToTable("reservations", null, t =>
                         {
@@ -183,6 +189,8 @@ namespace LabQueue.Core.Migrations
                     b.HasIndex("Code")
                         .IsUnique()
                         .HasDatabaseName("ix_resources_code");
+
+                    b.HasIndex("RequiredCertificationId");
 
                     b.ToTable("resources", null, t =>
                         {
@@ -257,6 +265,8 @@ namespace LabQueue.Core.Migrations
                         .HasDefaultValueSql("now()");
 
                     b.HasKey("UserId", "CertificationId");
+
+                    b.HasIndex("CertificationId");
 
                     b.ToTable("user_certifications", (string)null);
                 });

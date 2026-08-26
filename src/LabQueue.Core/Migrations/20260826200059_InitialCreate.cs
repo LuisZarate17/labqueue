@@ -158,10 +158,35 @@ namespace LabQueue.Core.Migrations
                 unique: true);
 
             migrationBuilder.CreateIndex(
+                name: "IX_maintenance_windows_resource_id",
+                table: "maintenance_windows",
+                column: "resource_id");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_reservations_resource_id",
+                table: "reservations",
+                column: "resource_id");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_reservations_user_id",
+                table: "reservations",
+                column: "user_id");
+
+            migrationBuilder.CreateIndex(
                 name: "ix_resources_code",
                 table: "resources",
                 column: "code",
                 unique: true);
+
+            migrationBuilder.CreateIndex(
+                name: "IX_resources_required_certification_id",
+                table: "resources",
+                column: "required_certification_id");
+
+            migrationBuilder.CreateIndex(
+                name: "IX_user_certifications_certification_id",
+                table: "user_certifications",
+                column: "certification_id");
 
             migrationBuilder.CreateIndex(
                 name: "ix_users_email",

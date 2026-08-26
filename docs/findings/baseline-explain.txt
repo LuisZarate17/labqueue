@@ -1,8 +1,8 @@
 labqueue — Finding B baseline
 =============================
 
-Captured   : 2026-08-26 01:52:01Z
-Commit     : fd9975242c0a5e51897095630b3f26f9ad212cfe
+Captured   : 2026-08-26 20:03:05Z
+Commit     : (recaptured after restoring EF's foreign-key index convention)
 Host       : Ryzen 7 9700X, 32 GB DDR5, Docker Desktop (WSL2)
 Reproduce  : docker compose down -v && docker compose up -d
              dotnet ef database update -p src/LabQueue.Core -s src/LabQueue.Api
@@ -10,43 +10,59 @@ Reproduce  : docker compose down -v && docker compose up -d
              docker compose exec -T db psql -U labqueue -d labqueue -f /db/seed/02_reservations.sql
              docker compose exec -T db psql -U labqueue -d labqueue -f /db/explain/availability.sql
 
-This is state 1 of the three-state measurement: no index on reservations at all.
-States 2 (btree on resource_id) and 3 (GiST on resource_id + during) are measured
-in phase 06 against this same seed. The seed derives every key from md5() of a
-stable string and anchors its timeline to fixed dates, so a full teardown and
-reload reproduces it exactly: verified at 500,942 confirmed / 9,973 cancelled /
-739 maintenance windows across two independent loads.
+What this baseline is
+---------------------
+The schema carries the indexes EF Core creates on its own: a btree on every
+foreign key, including reservations.resource_id. That is what a reservation API
+written with EF Core looks like by default, and it is the baseline Finding B is
+measured against.
+
+An earlier capture removed ForeignKeyIndexConvention, which produced a sequential
+scan and a much larger apparent improvement. That was rejected: suppressing an
+index the ORM would have created makes the "before" number a property of the
+measurement setup rather than of the code, and it inflates the result by folding
+"no index at all" into what is meant to be a claim about range indexing.
+
+So there are three states, and only the second delta is Finding B:
+
+  1. no index at all              — not shipped; artificial, requires disabling a convention
+  2. btree on resource_id         — THIS FILE. What EF Core gives you by default
+  3. gist (resource_id, during)   — the phase 06 fix
+
+The interesting result is that the query is already using an index here and is
+still doing far too much work: the bitmap index scan finds 2,454 rows for the
+resource, and the heap filter then discards 2,431 of them to return 23. The
+resource is selective; the time window is not indexed at all. That is the finding.
+
+On buffer accounting: with the foreign-key index in place the measured run reports
+shared hit throughout — the bitmap scan touches 2,453 buffers and stays inside
+shared_buffers. The earlier seq-scan baseline reported "read" because a 57 MB heap
+exceeds the 32 MB (shared_buffers / 4) threshold at which Postgres switches
+sequential scans to a 256 KB bulk-read ring buffer and stops retaining the table.
+That no longer applies to this plan, and is recorded only because it explains the
+difference against the previous capture.
 
 Method
 ------
-Two forms of the same query are captured. The first uses literals, which is the
-form the plan document specifies. The second is the statement EF Core actually
-emits, run through PREPARE/EXECUTE under both plan_cache_mode settings, because
-the application sends bind parameters rather than literals and a generic plan can
-differ from a custom one. The column lists are equivalent: EF names all seven
-columns, which is "SELECT *" in all but spelling.
-
-A warm-up execution is run and discarded before the measured run.
-
-On buffer accounting: the reservations heap is 57 MB against a shared_buffers of
-128 MB, which puts it over the 32 MB (shared_buffers / 4) threshold at which
-Postgres switches sequential scans to a 256 KB bulk-read ring buffer. The table
-is therefore NOT retained in shared_buffers between scans, which is why the plans
-below report "read" rather than "hit" even on a repeated run. Those reads are
-served by the OS page cache, not the disk. This is ordinary behaviour for a table
-of this size and it is stable across runs, so before/after comparisons remain
-valid; it is recorded because the raw buffer counts otherwise look like cold I/O.
+Three forms of the same query are captured: the literal form the plan document
+specifies, and the statement EF Core actually emits under both plan_cache_mode
+settings, because the application sends bind parameters rather than literals. All
+three agree on plan shape and time, so the custom-vs-generic question is settled
+rather than assumed. A warm-up execution is run and discarded before the measured
+run.
 
 === environment ===
          server_version          | shared_buffers | work_mem | effective_cache_size | confirmed_rows | reservations_size 
 ---------------------------------+----------------+----------+----------------------+----------------+-------------------
- 17.11 (Debian 17.11-1.pgdg13+2) | 128MB          | 4MB      | 4GB                  |         500942 | 76 MB
+ 17.11 (Debian 17.11-1.pgdg13+2) | 128MB          | 4MB      | 4GB                  |         500942 | 85 MB
 
 
 === indexes present on reservations ===
-    indexname    |                                   indexdef                                    
------------------+-------------------------------------------------------------------------------
- PK_reservations | CREATE UNIQUE INDEX "PK_reservations" ON public.reservations USING btree (id)
+          indexname          |                                          indexdef                                           
+-----------------------------+---------------------------------------------------------------------------------------------
+ IX_reservations_resource_id | CREATE INDEX "IX_reservations_resource_id" ON public.reservations USING btree (resource_id)
+ IX_reservations_user_id     | CREATE INDEX "IX_reservations_user_id" ON public.reservations USING btree (user_id)
+ PK_reservations             | CREATE UNIQUE INDEX "PK_reservations" ON public.reservations USING btree (id)
 
 
 === query ===
@@ -55,51 +71,49 @@ WHERE resource_id = <RES-100> AND status = 'confirmed'
   AND during && tstzrange('2026-06-01+00', '2026-06-08+00', '[)');
 
 === EXPLAIN (ANALYZE, BUFFERS) — measured run ===
-                                                                                            QUERY PLAN                                                                                            
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Gather  (cost=1000.00..12037.42 rows=20 width=96) (actual time=5.349..15.022 rows=23 loops=1)
-   Workers Planned: 2
-   Workers Launched: 2
-   Buffers: shared hit=5690 read=1670
-   ->  Parallel Seq Scan on reservations  (cost=0.00..11035.42 rows=8 width=96) (actual time=3.927..10.954 rows=8 loops=3)
-         Filter: ((during && '["2026-06-01 00:00:00+00","2026-06-08 00:00:00+00")'::tstzrange) AND (resource_id = 'fc3602d7-ae9c-10bb-5ada-e3a4cafd4635'::uuid) AND (status = 'confirmed'::text))
-         Rows Removed by Filter: 170297
-         Buffers: shared hit=5690 read=1670
- Planning Time: 0.082 ms
- Execution Time: 15.032 ms
+                                                                 QUERY PLAN                                                                  
+---------------------------------------------------------------------------------------------------------------------------------------------
+ Bitmap Heap Scan on reservations  (cost=28.20..4653.84 rows=20 width=96) (actual time=0.627..1.099 rows=23 loops=1)
+   Recheck Cond: (resource_id = 'fc3602d7-ae9c-10bb-5ada-e3a4cafd4635'::uuid)
+   Filter: ((during && '["2026-06-01 00:00:00+00","2026-06-08 00:00:00+00")'::tstzrange) AND (status = 'confirmed'::text))
+   Rows Removed by Filter: 2431
+   Heap Blocks: exact=2449
+   Buffers: shared hit=2453
+   ->  Bitmap Index Scan on "IX_reservations_resource_id"  (cost=0.00..28.20 rows=2103 width=0) (actual time=0.145..0.145 rows=2454 loops=1)
+         Index Cond: (resource_id = 'fc3602d7-ae9c-10bb-5ada-e3a4cafd4635'::uuid)
+         Buffers: shared hit=4
+ Planning Time: 0.067 ms
+ Execution Time: 1.129 ms
 
-PREPARE
 
 === EXPLAIN — EF Core statement, custom plan ===
-SET
-                                                                                            QUERY PLAN                                                                                            
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
- Gather  (cost=1000.00..12037.42 rows=20 width=96) (actual time=5.230..15.065 rows=23 loops=1)
-   Workers Planned: 2
-   Workers Launched: 2
-   Buffers: shared hit=5786 read=1574
-   ->  Parallel Seq Scan on reservations r  (cost=0.00..11035.42 rows=8 width=96) (actual time=3.885..10.996 rows=8 loops=3)
-         Filter: ((during && '["2026-06-01 00:00:00+00","2026-06-08 00:00:00+00")'::tstzrange) AND (resource_id = 'fc3602d7-ae9c-10bb-5ada-e3a4cafd4635'::uuid) AND (status = 'confirmed'::text))
-         Rows Removed by Filter: 170297
-         Buffers: shared hit=5786 read=1574
- Planning Time: 0.128 ms
- Execution Time: 15.076 ms
+                                                                 QUERY PLAN                                                                  
+---------------------------------------------------------------------------------------------------------------------------------------------
+ Bitmap Heap Scan on reservations r  (cost=28.20..4653.84 rows=20 width=96) (actual time=0.518..0.892 rows=23 loops=1)
+   Recheck Cond: (resource_id = 'fc3602d7-ae9c-10bb-5ada-e3a4cafd4635'::uuid)
+   Filter: ((during && '["2026-06-01 00:00:00+00","2026-06-08 00:00:00+00")'::tstzrange) AND (status = 'confirmed'::text))
+   Rows Removed by Filter: 2431
+   Heap Blocks: exact=2449
+   Buffers: shared hit=2453
+   ->  Bitmap Index Scan on "IX_reservations_resource_id"  (cost=0.00..28.20 rows=2103 width=0) (actual time=0.131..0.131 rows=2454 loops=1)
+         Index Cond: (resource_id = 'fc3602d7-ae9c-10bb-5ada-e3a4cafd4635'::uuid)
+         Buffers: shared hit=4
+ Planning Time: 0.088 ms
+ Execution Time: 0.917 ms
 
 
 === EXPLAIN — EF Core statement, generic plan ===
-SET
-                                                          QUERY PLAN                                                          
-------------------------------------------------------------------------------------------------------------------------------
- Gather  (cost=1000.00..12037.92 rows=25 width=96) (actual time=5.634..15.533 rows=23 loops=1)
-   Workers Planned: 2
-   Workers Launched: 2
-   Buffers: shared hit=5882 read=1478
-   ->  Parallel Seq Scan on reservations r  (cost=0.00..11035.42 rows=10 width=96) (actual time=4.027..11.205 rows=8 loops=3)
-         Filter: ((during && $2) AND (resource_id = $1) AND (status = 'confirmed'::text))
-         Rows Removed by Filter: 170297
-         Buffers: shared hit=5882 read=1478
- Planning Time: 0.107 ms
- Execution Time: 15.544 ms
+                                                                 QUERY PLAN                                                                  
+---------------------------------------------------------------------------------------------------------------------------------------------
+ Bitmap Heap Scan on reservations r  (cost=31.59..5217.11 rows=25 width=96) (actual time=0.529..0.885 rows=23 loops=1)
+   Recheck Cond: (resource_id = $1)
+   Filter: ((during && $2) AND (status = 'confirmed'::text))
+   Rows Removed by Filter: 2431
+   Heap Blocks: exact=2449
+   Buffers: shared hit=2453
+   ->  Bitmap Index Scan on "IX_reservations_resource_id"  (cost=0.00..31.58 rows=2555 width=0) (actual time=0.135..0.135 rows=2454 loops=1)
+         Index Cond: (resource_id = $1)
+         Buffers: shared hit=4
+ Planning Time: 0.070 ms
+ Execution Time: 0.913 ms
 
-RESET
-DEALLOCATE
