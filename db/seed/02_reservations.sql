@@ -1,6 +1,6 @@
 -- labqueue seed, part 2 of 2: reservations and maintenance windows.
 --
---   docker compose exec -T db psql -U labqueue -d labqueue -f /seed/02_reservations.sql
+--   docker compose exec -T db psql -U labqueue -d labqueue -f /db/seed/02_reservations.sql
 --
 -- The timeline is anchored to fixed literals rather than now(), so reloading on a
 -- different day produces identical rows. Two years of 4-hour slots gives

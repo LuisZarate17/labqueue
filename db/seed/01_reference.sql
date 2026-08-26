@@ -4,7 +4,7 @@
 -- produces byte-identical rows. Load-test scripts and captured query plans can
 -- therefore cite a specific resource id and still be valid after a reseed.
 --
---   docker compose exec -T db psql -U labqueue -d labqueue -f /seed/01_reference.sql
+--   docker compose exec -T db psql -U labqueue -d labqueue -f /db/seed/01_reference.sql
 
 \set ON_ERROR_STOP on
 \timing on

@@ -1,6 +1,6 @@
 -- labqueue seed verification. Every row of output must read PASS.
 --
---   docker compose exec -T db psql -U labqueue -d labqueue -f /seed/03_verify.sql
+--   docker compose exec -T db psql -U labqueue -d labqueue -f /db/seed/03_verify.sql
 
 \set ON_ERROR_STOP on
 \timing off

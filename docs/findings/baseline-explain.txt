@@ -1,0 +1,63 @@
+labqueue — Finding B baseline
+=============================
+
+Captured   : 2026-08-26 01:34:00Z
+Commit     : d23c11e37c7d5a3a48d55d715f8533932c5b72fc
+Host       : Ryzen 7 9700X, 32 GB DDR5, Docker Desktop (WSL2)
+Reproduce  : docker compose up -d
+             dotnet ef database update -p src/LabQueue.Core -s src/LabQueue.Api
+             docker compose exec -T db psql -U labqueue -d labqueue -f /db/seed/01_reference.sql
+             docker compose exec -T db psql -U labqueue -d labqueue -f /db/seed/02_reservations.sql
+             docker compose exec -T db psql -U labqueue -d labqueue -f /db/explain/availability.sql
+
+This is state 1 of the three-state measurement: no index on reservations at all.
+States 2 (btree on resource_id) and 3 (GiST on resource_id + during) are measured
+in phase 06 against this same seed, which is deterministic and reloads identically.
+
+Method
+------
+Parameters are literals, not bind parameters, so the plan shown is a custom plan
+and not a generic one. A warm-up execution is run and discarded before the
+measured run.
+
+On buffer accounting: the reservations heap is 57 MB against a shared_buffers of
+128 MB, which puts it over the 32 MB (shared_buffers / 4) threshold at which
+Postgres switches sequential scans to a 256 KB bulk-read ring buffer. The table
+is therefore NOT retained in shared_buffers between scans, which is why the plan
+below reports "read" rather than "hit" even on a repeated run. Those reads are
+served by the OS page cache rather than the disk. This is ordinary behaviour for
+a table of this size and it is stable across runs, so before/after comparisons
+are valid; it is recorded here because the raw buffer counts look like cold I/O
+and are not.
+
+=== environment ===
+         server_version          | shared_buffers | work_mem | effective_cache_size | confirmed_rows | reservations_size 
+---------------------------------+----------------+----------+----------------------+----------------+-------------------
+ 17.11 (Debian 17.11-1.pgdg13+2) | 128MB          | 4MB      | 4GB                  |         500942 | 76 MB
+
+
+=== indexes present on reservations ===
+    indexname    |                                   indexdef                                    
+-----------------+-------------------------------------------------------------------------------
+ PK_reservations | CREATE UNIQUE INDEX "PK_reservations" ON public.reservations USING btree (id)
+
+
+=== query ===
+SELECT * FROM reservations
+WHERE resource_id = <RES-100> AND status = 'confirmed'
+  AND during && tstzrange('2026-06-01+00', '2026-06-08+00', '[)');
+
+=== EXPLAIN (ANALYZE, BUFFERS) — measured run ===
+                                                                                            QUERY PLAN                                                                                            
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Gather  (cost=1000.00..12038.02 rows=26 width=96) (actual time=5.080..12.668 rows=23 loops=1)
+   Workers Planned: 2
+   Workers Launched: 2
+   Buffers: shared hit=530 read=6830
+   ->  Parallel Seq Scan on reservations  (cost=0.00..11035.42 rows=11 width=96) (actual time=3.715..10.064 rows=8 loops=3)
+         Filter: ((during && '["2026-06-01 00:00:00+00","2026-06-08 00:00:00+00")'::tstzrange) AND (resource_id = 'fc3602d7-ae9c-10bb-5ada-e3a4cafd4635'::uuid) AND (status = 'confirmed'::text))
+         Rows Removed by Filter: 170297
+         Buffers: shared hit=530 read=6830
+ Planning Time: 0.061 ms
+ Execution Time: 12.676 ms
+
