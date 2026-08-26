@@ -1,0 +1,23 @@
+services:
+  db:
+    image: postgres:17
+    container_name: labqueue-db
+    environment:
+      POSTGRES_USER: labqueue
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-labqueue_dev}
+      POSTGRES_DB: labqueue
+    ports:
+      - "5432:5432"
+    volumes:
+      - labqueue-pgdata:/var/lib/postgresql/data
+      - ./db/seed:/seed:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U labqueue -d labqueue"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  labqueue-pgdata:
