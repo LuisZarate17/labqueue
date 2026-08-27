@@ -1,0 +1,114 @@
+labqueue — Finding A reproducer
+===============================
+
+Captured   : 2026-08-26
+Test       : LabQueue.Tests.ConcurrentBookingTests
+             .Fifty_concurrent_bookings_for_one_slot_yield_exactly_one_reservation
+Host       : Docker Desktop (WSL2), Windows 11
+Database   : postgres:17 (17.11), started per test class by Testcontainers
+Runtime    : .NET SDK 10 container; Smart App Control blocks host builds on this machine
+Reproduce  : ./scripts/dev-test.ps1 -Unskip -Filter Fifty_concurrent -Repeat 5
+
+What this file is
+-----------------
+The recorded failure of a concurrency test committed *before* the fix exists. The
+test is committed skipped and fails the moment it is un-skipped.
+
+The ordering is the point. A concurrency test written after a fix proves nothing:
+nothing establishes that it ever exercised the race, so it may have passed on the
+first run for reasons unrelated to the change. Committed first and shown failing,
+it becomes the thing the fix has to turn green.
+
+What fails
+----------
+ReservationService.BookAsync checks for an overlapping reservation with a SELECT
+and then INSERTs, with no transaction and no lock:
+
+    src/LabQueue.Core/Services/ReservationService.cs
+      79   var conflict = await db.Reservations.FirstOrDefaultAsync(...)
+      85   if (conflict is not null) -> 409
+     103   db.Reservations.Add(reservation);
+     104   await db.SaveChangesAsync(ct);
+
+Under READ COMMITTED every request whose SELECT runs before some other request has
+committed its INSERT sees an empty result, concludes the slot is free, and inserts.
+The check and the act are not atomic, and nothing in the schema refuses the second
+row: `reservations` carries a primary key and EF Core's two foreign-key btrees, and
+no uniqueness or exclusion constraint over (resource_id, during).
+
+Fifty requests released together therefore do not produce one booking and
+forty-nine conflicts. They produce as many bookings as fit inside the window
+between the first SELECT and the first committed INSERT.
+
+Result
+------
+Five consecutive runs, one resource, one time window, fifty simultaneous
+POST /reservations:
+
+    run 1    201 x37   409 x13    37 confirmed rows    release spread  1.948 ms
+    run 2    201 x32   409 x18    32 confirmed rows    release spread  1.990 ms
+    run 3    201 x30   409 x20    30 confirmed rows    release spread  1.932 ms
+    run 4    201 x19   409 x31    19 confirmed rows    release spread  1.938 ms
+    run 5    201 x39   409 x11    39 confirmed rows    release spread 14.134 ms
+
+Expected in every case: 201 x1, 409 x49, one confirmed row.
+
+Full output, run 1
+------------------
+  Failed LabQueue.Tests.ConcurrentBookingTests
+         .Fifty_concurrent_bookings_for_one_slot_yield_exactly_one_reservation [506 ms]
+  Error Message:
+
+  50 simultaneous POST /reservations, one resource, one window.
+
+    expected          : 201 x1, 409 x49, 1 confirmed row
+    actual            : 201 Created x37, 409 Conflict x13
+    confirmed rows    : 37
+    release spread    : 1.948 ms across 50 threads
+
+  Stack Trace:
+     at LabQueue.Tests.ConcurrentBookingTests.RaceAsync(Guid resourceId)
+        in /src/tests/LabQueue.Tests/ConcurrentBookingTests.cs:line 133
+     at LabQueue.Tests.ConcurrentBookingTests
+        .Fifty_concurrent_bookings_for_one_slot_yield_exactly_one_reservation()
+        in /src/tests/LabQueue.Tests/ConcurrentBookingTests.cs:line 42
+
+  Failed!  - Failed: 1, Passed: 0, Skipped: 0, Total: 1, Duration: 506 ms
+
+Why the numbers vary
+--------------------
+The count is not a property of the bug, it is a property of how many requests get
+their SELECT in before the first INSERT commits. That depends on scheduling, so it
+moves between runs. What is stable across all five runs is that it is never one.
+
+Why the release spread is reported
+----------------------------------
+The failure is only meaningful if the fifty requests were genuinely simultaneous, so
+the test records a timestamp on each thread the instant the barrier releases it and
+reports the spread. A spread of roughly two milliseconds across fifty threads is
+the requests actually overlapping.
+
+It is reported for the opposite case too. If this test ever passes, the spread says
+whether it passed because something in the schema stopped the race or because the
+requests never raced at all — a test that cannot fail proves nothing, and a passing
+run with a large spread is the second case wearing the first one's clothes.
+
+What was deliberately not done
+------------------------------
+No delay was injected between the SELECT and the INSERT, and nothing was added to
+the booking path to widen the window. The window measured here is the one the code
+has. Costs that would otherwise land on whichever requests happened to go first —
+JIT, EF Core query compilation, opening Npgsql connections — are paid before the
+barrier, which tightens the release rather than widening the window.
+
+Three things that would make this test pass for the wrong reason were avoided in
+the fixture: a shared transaction across requests, a connection-pool ceiling below
+fifty, and awaiting the fifty calls in a loop. Each serialises the requests. The
+fixture opens no transaction, sets no MaxPoolSize, and releases fifty dedicated
+threads from a Barrier.
+
+Next
+----
+Phase 06 measures both fixes and lands them in a fixed order. When the exclusion
+constraint is in place, un-skip this test: it is the check that the fix fixed
+something.
