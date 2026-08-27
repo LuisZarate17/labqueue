@@ -31,15 +31,51 @@ query plans committed alongside the code.
 | Load testing | k6, run locally against docker-compose |
 | Observability | OpenTelemetry → Grafana Cloud |
 
+## Running it locally
+
+Everything runs in containers. The API image is the same one that gets deployed.
+
+```bash
+cp .env.example .env          # then set Jwt__Key to 32+ bytes
+docker compose up -d --build
+./scripts/db-migrate.ps1 -Target local
+```
+
+The API is on `http://localhost:5140`; `/` prints what you need to start and `/health`
+answers `{"status":"ok"}`. Set `Demo__Seed=true` in `.env` and the API seeds a small demo
+dataset at boot — six resources, a maintenance window, a few upcoming bookings.
+
+For the 500k-row benchmark dataset used by the load tests:
+
+```bash
+docker compose exec -T db psql -U labqueue -d labqueue -f /db/seed/01_reference.sql
+docker compose exec -T db psql -U labqueue -d labqueue -f /db/seed/02_reservations.sql
+```
+
+`scripts/gate02.sh` runs 24 HTTP checks against a running instance, and
+`scripts/dev-test.ps1` runs the xUnit suite against a real Postgres via Testcontainers.
+
+## Why the load tests do not run against the hosted instance
+
+Free tiers throttle. Neon scales compute to zero after five minutes idle and free web
+services spin down after fifteen. Point k6 at either and the P99 you measure is their rate
+limiter, not your query plan.
+
+So the two jobs are split. The hosted URL exists so a reviewer can click something real.
+The measurements happen locally against docker-compose on the 500k-row seed, on hardware
+with no noisy neighbours. Both environments export telemetry to the same Grafana stack,
+distinguished by a `deployment.environment` resource attribute, so the local run is still
+visible on the same dashboard as the hosted one.
+
 ## Status
 
 | Phase | |
 |---|---|
 | 01 — Domain model & migrations | ✅ |
 | 02 — API & auth | ✅ |
-| 03 — Tests & CI | ⬜ |
-| 04 — Containerize & deploy | ⬜ |
-| 05 — Observability | ⬜ |
+| 03 — Tests & CI | ✅ |
+| 04 — Containerize & deploy | 🚧 |
+| 05 — Observability | 🚧 |
 | 06 — Load test & findings | ⬜ |
 | 07 — Write-up | ⬜ |
 

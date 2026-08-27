@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using LabQueue.Api.Auth;
 using LabQueue.Api.Contracts;
+using LabQueue.Api.Observability;
 using LabQueue.Api.Validation;
 using LabQueue.Core.Data;
 using LabQueue.Core.Entities;
@@ -27,10 +28,19 @@ public static class ReservationEndpoints
         CreateReservationRequest request,
         ClaimsPrincipal principal,
         ReservationService reservations,
+        LabQueueMetrics metrics,
         CancellationToken ct)
     {
         var result = await reservations.BookAsync(
             principal.UserId(), request.ResourceId, request.From, request.To, ct);
+
+        if (result.Outcome == BookingOutcome.ReservationConflict)
+        {
+            // Only this outcome. ResourceNotActive and MaintenanceConflict are 409s as well,
+            // but they are not the overlap check, and counting them here would blunt the
+            // signal this instrument exists to carry.
+            metrics.ReservationConflict();
+        }
 
         return result.Outcome switch
         {

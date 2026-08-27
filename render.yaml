@@ -1,0 +1,60 @@
+# Render blueprint. Committed for the shape, not the values: every secret below is
+# sync: false, which means Render prompts for it and stores it, and nothing real reaches
+# git. See .env.example for what each one looks like.
+#
+# The database is not declared here on purpose. Render's free Postgres is deleted at day 30
+# without warning, so the database lives on Neon instead — permanent, and a portfolio link
+# that dies is worse than no link.
+
+services:
+  - type: web
+    name: labqueue-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    region: oregon
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+
+    envVars:
+      # Matches ASPNETCORE_HTTP_PORTS in the Dockerfile.
+      - key: PORT
+        value: 8080
+
+      - key: ASPNETCORE_ENVIRONMENT
+        value: Production
+
+      # Neon, pooled endpoint, Npgsql key-value form with SSL Mode=Require.
+      - key: ConnectionStrings__LabQueue
+        sync: false
+
+      # At least 32 bytes: Program.cs refuses to start otherwise.
+      - key: Jwt__Key
+        sync: false
+
+      # Demo data, seeded idempotently at boot so the demo heals itself after a database
+      # reset. Only the member credentials are ever published.
+      - key: Demo__Seed
+        value: "true"
+      - key: Demo__Email
+        sync: false
+      - key: Demo__Password
+        sync: false
+      - key: Demo__DisplayName
+        value: Demo Researcher
+
+      # Optional operator account. Never published, never printed on the landing route.
+      - key: Demo__AdminEmail
+        sync: false
+      - key: Demo__AdminPassword
+        sync: false
+
+      # Grafana Cloud OTLP. Absent these the app still runs and simply exports nothing.
+      - key: OTEL_EXPORTER_OTLP_ENDPOINT
+        sync: false
+      - key: OTEL_EXPORTER_OTLP_HEADERS
+        sync: false
+      - key: OTEL_EXPORTER_OTLP_PROTOCOL
+        value: http/protobuf
+      - key: OTEL_DEPLOYMENT_ENVIRONMENT
+        value: hosted

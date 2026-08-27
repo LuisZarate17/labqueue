@@ -1,0 +1,35 @@
+# Windows bin/obj artifacts break the Linux restore inside the build stage — the same
+# hazard scripts/dev-test.ps1 guards against when it packs source into a tar.
+**/bin
+**/obj
+**/TestResults
+
+# Not part of the runtime image. Tests would drag Testcontainers into the restore.
+tests/
+loadtest/
+scripts/
+db/
+docs/
+.github/
+
+# Secrets never enter the build context. Nothing .env-shaped is needed to build.
+.env
+.env.*
+*.pfx
+*.key
+**/appsettings.Development.json
+**/appsettings.Local.json
+
+# Noise.
+.git
+.gitignore
+.gitattributes
+.vs/
+.vscode/
+.idea/
+.claude/
+*.md
+LICENSE
+docker-compose.yml
+Dockerfile
+.dockerignore

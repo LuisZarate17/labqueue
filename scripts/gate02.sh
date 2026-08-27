@@ -11,7 +11,7 @@
 #   3. /tmp/ids.txt defining UNGATED, GATED and RETIRED resource ids. Generate:
 #        docker compose exec -T db psql -tA -U labqueue -d labqueue \
 #          -c "SELECT 'UNGATED='||id FROM resources WHERE required_certification_id IS NULL AND status='active' LIMIT 1" \
-#          -c "SELECT 'GATED='||id   FROM resources WHERE required_certification_id IS NOT NULL LIMIT 1" \
+#          -c "SELECT 'GATED='||id   FROM resources WHERE required_certification_id IS NOT NULL AND status='active' LIMIT 1" \
 #          -c "SELECT 'RETIRED='||id FROM resources WHERE status='retired' LIMIT 1" > /tmp/ids.txt
 
 set -u

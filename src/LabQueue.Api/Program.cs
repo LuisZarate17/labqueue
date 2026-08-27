@@ -3,6 +3,7 @@ using FluentValidation;
 using LabQueue.Api.Auth;
 using LabQueue.Api.Endpoints;
 using LabQueue.Api.Infrastructure;
+using LabQueue.Api.Observability;
 using LabQueue.Core.Data;
 using LabQueue.Core.Services;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -19,6 +20,8 @@ builder.Host.UseSerilog((context, services, configuration) => configuration
 
 builder.Services.AddDbContext<LabQueueDbContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("LabQueue")));
+
+builder.AddLabQueueObservability();
 
 builder.Services.Configure<JwtOptions>(builder.Configuration.GetSection(JwtOptions.SectionName));
 builder.Services.AddSingleton<PasswordHashing>();
@@ -77,6 +80,42 @@ app.UseStatusCodePages();
 app.UseAuthentication();
 app.UseAuthorization();
 
+// The landing route exists so a stranger who clicks the live URL lands on something that
+// tells them how to use it, rather than a 404.
+app.MapGet("/", (IConfiguration configuration) =>
+{
+    var demo = configuration.GetSection(DemoOptions.SectionName).Get<DemoOptions>() ?? new DemoOptions();
+
+    // Only the member account is ever published. Creating maintenance windows is an admin
+    // capability and a maintenance window blocks bookings on a resource, so a public admin
+    // login would let any visitor take the demo down for everyone after them.
+    object? demoCredentials = demo.Seed
+        ? new
+        {
+            email = demo.Email,
+            password = demo.Password,
+            role = "member",
+            howTo = "POST /auth/login with these credentials, then GET /resources and "
+                    + "POST /reservations with { resourceId, from, to }. Or register your own "
+                    + "account at POST /auth/register."
+        }
+        : null;
+
+    return Results.Ok(new
+    {
+        name = "labqueue",
+        description = "Lab equipment reservation API — book instruments for a window of time, "
+                      + "with certification gating and maintenance windows.",
+        source = "https://github.com/LuisZarate17/labqueue",
+        health = "/health",
+        demo = demoCredentials,
+        note = "Hosted on free tiers. The first request after a period of inactivity has to wake "
+               + "both the web service and the database, so it is slow; everything after it is not."
+    });
+})
+   .AllowAnonymous()
+   .WithName("Landing");
+
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }))
    .AllowAnonymous()
    .WithName("Health");
@@ -85,6 +124,10 @@ app.MapAuthEndpoints();
 app.MapResourceEndpoints();
 app.MapReservationEndpoints();
 app.MapAdminEndpoints();
+
+// Migrations are deliberately not applied here — they run out of band via
+// scripts/db-migrate.ps1. Demo data self-heals on boot; schema changes stay deliberate.
+await app.SeedDemoDataAsync();
 
 app.Run();
 

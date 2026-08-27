@@ -19,5 +19,35 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  # The same image that runs on Render, against the local database. Phase 06 points k6 at
+  # this, and it is what makes the local OTLP export path real rather than theoretical.
+  api:
+    build: .
+    container_name: labqueue-api
+    # OTLP endpoint, headers and the Jwt key come from the gitignored .env. Absent that
+    # file the API still starts; it just exports nothing. See .env.example.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Set here rather than in .env because .env carries the host-side value (localhost),
+      # which is not reachable from inside this container.
+      ConnectionStrings__LabQueue: "Host=db;Port=5432;Database=labqueue;Username=labqueue;Password=${POSTGRES_PASSWORD:-labqueue_dev}"
+      OTEL_DEPLOYMENT_ENVIRONMENT: local
+      # 60s is the SDK default and too coarse to see a conflict spike in a two-minute k6 run.
+      OTEL_METRIC_EXPORT_INTERVAL: "15000"
+      # Metrics stay complete; traces are sampled, because phase 06 generates far more
+      # requests than a 50GB free trace quota wants to hold.
+      OTEL_TRACES_SAMPLER: parentbased_traceidratio
+      OTEL_TRACES_SAMPLER_ARG: "0.1"
+    ports:
+      # 5140 is scripts/gate02.sh's default API port, so the 24-check oracle runs against
+      # this container unchanged.
+      - "5140:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   labqueue-pgdata:
