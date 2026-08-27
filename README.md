@@ -36,10 +36,15 @@ query plans committed alongside the code.
 Everything runs in containers. The API image is the same one that gets deployed.
 
 ```bash
-cp .env.example .env          # then set Jwt__Key to 32+ bytes
-docker compose up -d --build
+cp .env.example .env             # then set Jwt__Key to 32+ bytes
+docker compose up -d db          # database first
 ./scripts/db-migrate.ps1 -Target local
+docker compose up -d --build api
 ```
+
+Migrations are applied out of band rather than at startup, so the database comes up
+first. Starting the API against an empty database is not fatal, but it is not useful
+either — with `Demo__Seed=true` it will tell you to run the migration script.
 
 The API is on `http://localhost:5140`; `/` prints what you need to start and `/health`
 answers `{"status":"ok"}`. Set `Demo__Seed=true` in `.env` and the API seeds a small demo

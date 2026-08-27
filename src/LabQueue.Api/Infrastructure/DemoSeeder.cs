@@ -108,6 +108,18 @@ public static class DemoSeeder
         var passwords = scope.ServiceProvider.GetRequiredService<PasswordHashing>();
         var logger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger(nameof(DemoSeeder));
 
+        // Migrations run out of band, so the schema can legitimately be absent on a first
+        // boot against an empty database. That is a different condition from a bad
+        // configuration and deserves a message that says what to do about it, rather than a
+        // relation-does-not-exist stack trace repeating in a restart loop.
+        if (!await db.Database.CanConnectAsync() || !await SchemaExistsAsync(db))
+        {
+            throw new InvalidOperationException(
+                "Demo:Seed is true but the labqueue schema is not present. Migrations are applied "
+                + "out of band, not at startup - run scripts/db-migrate.ps1 (-Target local or "
+                + "-Target neon) before starting the API.");
+        }
+
         await EnsureCertificationsAsync(db);
         await EnsureResourcesAsync(db);
 
@@ -132,6 +144,9 @@ public static class DemoSeeder
     }
 
     // ---------------------------------------------------------------- pieces
+
+    private static async Task<bool> SchemaExistsAsync(LabQueueDbContext db)
+        => (await db.Database.GetAppliedMigrationsAsync()).Any();
 
     private static async Task EnsureCertificationsAsync(LabQueueDbContext db)
     {
