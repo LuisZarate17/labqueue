@@ -19,6 +19,33 @@ database findings — a concurrency bug in the booking path and a missing index 
 overlap query. Each is measured before and after the fix, with load-test numbers and
 query plans committed alongside the code.
 
+
+## Live demo
+
+**https://labqueue-api.onrender.com**
+
+```
+email     demo@labqueue.dev
+password  demo-labqueue-2026
+```
+
+`GET /` prints these plus a short how-to. The account is a **member**, not an admin —
+admin routes can create maintenance windows, and a public admin login would let any
+visitor block every resource for everyone after them.
+
+**Dashboard:** [labqueue-api (public)](https://microcactus109.grafana.net/public-dashboards/25963f6e626440e0a4edd6664a40c038)
+— request rate, error rate, latency percentiles, database query duration, and
+`reservations.conflicts.total`. It reads empty unless someone is actively using the demo,
+which is most of the time; the numbers that matter are committed under `docs/findings/`.
+
+> **Cold start: about 22 seconds.** Both tiers sleep when idle — Render stops the container
+> after 15 minutes, Neon scales compute to zero after 5. The first request wakes both, and
+> measured after 20 minutes idle it took **22.2s** to first byte; connect and TLS were 0.05s
+> and 0.07s of that, so the wait is startup, not network. Warm requests land in 75–130ms.
+
+Hosted on Neon (database) and Render (app), both free tier. Deliberately **not** Render's
+free Postgres, which is deleted at day 30 without warning.
+
 ## Stack
 
 | | |
@@ -79,8 +106,8 @@ visible on the same dashboard as the hosted one.
 | 01 — Domain model & migrations | ✅ |
 | 02 — API & auth | ✅ |
 | 03 — Tests & CI | ✅ |
-| 04 — Containerize & deploy | 🚧 |
-| 05 — Observability | 🚧 |
+| 04 — Containerize & deploy | ✅ |
+| 05 — Observability | ✅ |
 | 06 — Load test & findings | ⬜ |
 | 07 — Write-up | ⬜ |
 
