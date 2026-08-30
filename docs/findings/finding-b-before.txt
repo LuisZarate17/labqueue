@@ -1,0 +1,118 @@
+labqueue — Finding B, BEFORE
+============================
+
+Captured   : 2026-08-30 22:48:41Z
+Commit     : b0165ca65f5eed56d1e1f08e2d437686f406696d
+Host       : Ryzen 7 9700X, 32 GB DDR5, Docker Desktop (WSL2)
+Schema     : PK_reservations, IX_reservations_resource_id, IX_reservations_user_id
+             (EF Core's defaults — no GiST index, no exclusion constraint)
+Seed       : 500,942 confirmed reservations, 200 resources, 0 overlapping pairs
+Reproduce  : docker compose down -v && docker compose up -d db
+             dotnet ef database update -p src/LabQueue.Core -s src/LabQueue.Api
+             psql -f /db/seed/01_reference.sql && psql -f /db/seed/02_reservations.sql
+             docker compose up -d api
+             docker run --rm -i --network labqueue_default                -v "$PWD/loadtest:/scripts" -v "$PWD/docs/findings:/out"                -e BASE_URL=http://api:8080 grafana/k6 run                --summary-export=/out/finding-b-before.json /scripts/availability.js
+
+Method
+------
+GET /resources/{id}/availability?from=&to= — the overlap query, over HTTP.
+Ramping VUs: 30s to 50, 2m hold, 30s down. Resource id and the one-week window are
+randomised per iteration, so no single resource sits hot in cache. One warm-up run
+discarded before this one. k6 runs on the compose network against api:8080, so no
+published-port hop is in the timings.
+
+k6 result
+---------
+  requests          : 616,424   (3,423 req/s)
+  checks succeeded  : 100.00%   (616,421 / 616,421)
+  http_req_failed   : 0.00%
+
+  availability_duration
+    avg   12.06 ms
+    min    2.13 ms
+    med   11.48 ms
+    p(90) 19.08 ms
+    p(95) 21.78 ms
+    p(99) 27.59 ms
+    max   62.75 ms
+
+Query plan
+----------
+The index EF Core creates on the foreign key is used, and it is not enough: it finds
+every reservation for the resource, then the heap filter throws almost all of them away.
+
+  Bitmap Index Scan on IX_reservations_resource_id -> 2,454 rows
+  Bitmap Heap Scan, Filter (during && ...), Rows Removed by Filter: 2,431
+  -> 23 rows returned, 2,453 buffers touched, 0.861 ms
+
+The resource is selective. The time window is not indexed at all. That is Finding B.
+
+Full EXPLAIN output follows, in three forms: the literal query, and the statement EF Core
+emits under both plan_cache_mode settings.
+
+=== environment ===
+         server_version          | shared_buffers | work_mem | effective_cache_size | confirmed_rows | reservations_size 
+---------------------------------+----------------+----------+----------------------+----------------+-------------------
+ 17.11 (Debian 17.11-1.pgdg13+2) | 128MB          | 4MB      | 4GB                  |         500942 | 85 MB
+
+
+=== indexes present on reservations ===
+          indexname          |                                          indexdef                                           
+-----------------------------+---------------------------------------------------------------------------------------------
+ IX_reservations_resource_id | CREATE INDEX "IX_reservations_resource_id" ON public.reservations USING btree (resource_id)
+ IX_reservations_user_id     | CREATE INDEX "IX_reservations_user_id" ON public.reservations USING btree (user_id)
+ PK_reservations             | CREATE UNIQUE INDEX "PK_reservations" ON public.reservations USING btree (id)
+
+
+=== query ===
+SELECT * FROM reservations
+WHERE resource_id = <RES-100> AND status = 'confirmed'
+  AND during && tstzrange('2026-06-01+00', '2026-06-08+00', '[)');
+
+=== EXPLAIN (ANALYZE, BUFFERS) — measured run ===
+                                                                 QUERY PLAN                                                                  
+---------------------------------------------------------------------------------------------------------------------------------------------
+ Bitmap Heap Scan on reservations  (cost=32.99..5423.85 rows=29 width=96) (actual time=0.494..0.836 rows=23 loops=1)
+   Recheck Cond: (resource_id = 'fc3602d7-ae9c-10bb-5ada-e3a4cafd4635'::uuid)
+   Filter: ((during && '["2026-06-01 00:00:00+00","2026-06-08 00:00:00+00")'::tstzrange) AND (status = 'confirmed'::text))
+   Rows Removed by Filter: 2431
+   Heap Blocks: exact=2449
+   Buffers: shared hit=2453
+   ->  Bitmap Index Scan on "IX_reservations_resource_id"  (cost=0.00..32.99 rows=2742 width=0) (actual time=0.136..0.136 rows=2454 loops=1)
+         Index Cond: (resource_id = 'fc3602d7-ae9c-10bb-5ada-e3a4cafd4635'::uuid)
+         Buffers: shared hit=4
+ Planning Time: 0.053 ms
+ Execution Time: 0.861 ms
+
+
+=== EXPLAIN — EF Core statement, custom plan ===
+                                                                 QUERY PLAN                                                                  
+---------------------------------------------------------------------------------------------------------------------------------------------
+ Bitmap Heap Scan on reservations r  (cost=32.99..5423.85 rows=29 width=96) (actual time=0.478..0.811 rows=23 loops=1)
+   Recheck Cond: (resource_id = 'fc3602d7-ae9c-10bb-5ada-e3a4cafd4635'::uuid)
+   Filter: ((during && '["2026-06-01 00:00:00+00","2026-06-08 00:00:00+00")'::tstzrange) AND (status = 'confirmed'::text))
+   Rows Removed by Filter: 2431
+   Heap Blocks: exact=2449
+   Buffers: shared hit=2453
+   ->  Bitmap Index Scan on "IX_reservations_resource_id"  (cost=0.00..32.99 rows=2742 width=0) (actual time=0.133..0.133 rows=2454 loops=1)
+         Index Cond: (resource_id = 'fc3602d7-ae9c-10bb-5ada-e3a4cafd4635'::uuid)
+         Buffers: shared hit=4
+ Planning Time: 0.072 ms
+ Execution Time: 0.838 ms
+
+
+=== EXPLAIN — EF Core statement, generic plan ===
+                                                                 QUERY PLAN                                                                  
+---------------------------------------------------------------------------------------------------------------------------------------------
+ Bitmap Heap Scan on reservations r  (cost=31.59..5217.11 rows=25 width=96) (actual time=0.475..0.818 rows=23 loops=1)
+   Recheck Cond: (resource_id = $1)
+   Filter: ((during && $2) AND (status = 'confirmed'::text))
+   Rows Removed by Filter: 2431
+   Heap Blocks: exact=2449
+   Buffers: shared hit=2453
+   ->  Bitmap Index Scan on "IX_reservations_resource_id"  (cost=0.00..31.58 rows=2555 width=0) (actual time=0.128..0.128 rows=2454 loops=1)
+         Index Cond: (resource_id = $1)
+         Buffers: shared hit=4
+ Planning Time: 0.074 ms
+ Execution Time: 0.841 ms
+

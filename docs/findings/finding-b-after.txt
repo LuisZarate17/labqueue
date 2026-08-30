@@ -1,0 +1,134 @@
+labqueue — Finding B, AFTER
+===========================
+
+Captured   : 2026-08-30 22:54:36Z
+Commit     : b0165ca65f5eed56d1e1f08e2d437686f406696d (plus migration AddReservationOverlapIndex, uncommitted at capture)
+Host       : Ryzen 7 9700X, 32 GB DDR5, Docker Desktop (WSL2)
+Schema     : as before, plus
+             CREATE INDEX ix_reservations_resource_during
+               ON reservations USING gist (resource_id, during)
+               WHERE status = 'confirmed';
+Seed       : 500,942 confirmed reservations — identical, reloaded from scratch
+Script     : loadtest/availability.js — byte-identical to the before run
+
+Method
+------
+docker compose down -v, migrate, reseed, restart the API, one warm-up run discarded,
+then the measured run. Same hardware, same script, same seed, same VU profile. The only
+thing that changed between the two runs is the index.
+
+k6 result
+---------
+  requests          : 1,311,186   (7,282 req/s)
+  checks succeeded  : 100.00%     (1,311,183 / 1,311,183)
+  http_req_failed   : 0.00%
+
+  availability_duration
+    avg    5.62 ms
+    min   29.45 us
+    med    5.33 ms
+    p(90)  8.47 ms
+    p(95)  9.91 ms
+    p(99) 13.64 ms
+    max   42.37 ms
+
+Before / after
+--------------
+
+                        before (btree)   after (GiST)    change
+  p50                        11.48 ms        5.33 ms     2.15x faster
+  p95                        21.78 ms        9.91 ms     2.20x faster
+  p99                        27.59 ms       13.64 ms     2.02x faster
+  throughput              3,423 req/s    7,282 req/s     2.13x
+  ---
+  query execution time       0.861 ms       0.032 ms    26.9x faster
+  buffers touched          2,453           28           88x fewer
+  rows discarded by filter 2,431            0
+
+Read those two blocks together, because they do not agree and the disagreement is the
+interesting part. The query itself got roughly 27x faster. The HTTP request it sits inside
+got about 2.1x faster. The difference is everything else in a request that was never the
+index's fault: JWT validation, model binding, EF materialisation, JSON serialisation, and
+the network hop. At this seed size the overlap query was a large part of the request but
+never all of it, so Amdahl caps what one index can do end to end.
+
+Doubling throughput on a single-line schema change is still the honest headline. Claiming
+27x would not be: that number is real at the database, and it is not what a caller
+experiences.
+
+Query plan
+----------
+The index now covers both halves of the predicate, so the scan lands directly on the
+answer instead of filtering to it:
+
+  Bitmap Index Scan on ix_reservations_resource_during
+    Index Cond: (resource_id = ... AND during && ...)   <- both, not just resource_id
+    -> 23 rows, no heap filter, 0 rows removed
+  28 buffers touched, 0.032 ms
+
+Compare the before run: 2,454 rows found by the foreign-key index, 2,431 of them thrown
+away by the heap filter, 2,453 buffers, 0.861 ms.
+
+Full EXPLAIN output follows, in the same three forms as the before capture.
+
+=== environment ===
+         server_version          | shared_buffers | work_mem | effective_cache_size | confirmed_rows | reservations_size 
+---------------------------------+----------------+----------+----------------------+----------------+-------------------
+ 17.11 (Debian 17.11-1.pgdg13+2) | 128MB          | 4MB      | 4GB                  |         500942 | 150 MB
+
+
+=== indexes present on reservations ===
+            indexname            |                                                                indexdef                                                                 
+---------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------
+ IX_reservations_resource_id     | CREATE INDEX "IX_reservations_resource_id" ON public.reservations USING btree (resource_id)
+ IX_reservations_user_id         | CREATE INDEX "IX_reservations_user_id" ON public.reservations USING btree (user_id)
+ PK_reservations                 | CREATE UNIQUE INDEX "PK_reservations" ON public.reservations USING btree (id)
+ ix_reservations_resource_during | CREATE INDEX ix_reservations_resource_during ON public.reservations USING gist (resource_id, during) WHERE (status = 'confirmed'::text)
+
+
+=== query ===
+SELECT * FROM reservations
+WHERE resource_id = <RES-100> AND status = 'confirmed'
+  AND during && tstzrange('2026-06-01+00', '2026-06-08+00', '[)');
+
+=== EXPLAIN (ANALYZE, BUFFERS) — measured run ===
+                                                                                            QUERY PLAN                                                                                            
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Bitmap Heap Scan on reservations  (cost=4.48..77.91 rows=19 width=96) (actual time=0.019..0.025 rows=23 loops=1)
+   Recheck Cond: ((resource_id = 'fc3602d7-ae9c-10bb-5ada-e3a4cafd4635'::uuid) AND (during && '["2026-06-01 00:00:00+00","2026-06-08 00:00:00+00")'::tstzrange) AND (status = 'confirmed'::text))
+   Heap Blocks: exact=23
+   Buffers: shared hit=28
+   ->  Bitmap Index Scan on ix_reservations_resource_during  (cost=0.00..4.48 rows=19 width=0) (actual time=0.016..0.016 rows=23 loops=1)
+         Index Cond: ((resource_id = 'fc3602d7-ae9c-10bb-5ada-e3a4cafd4635'::uuid) AND (during && '["2026-06-01 00:00:00+00","2026-06-08 00:00:00+00")'::tstzrange))
+         Buffers: shared hit=5
+ Planning Time: 0.057 ms
+ Execution Time: 0.032 ms
+
+
+=== EXPLAIN — EF Core statement, custom plan ===
+                                                                                            QUERY PLAN                                                                                            
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Bitmap Heap Scan on reservations r  (cost=4.48..77.91 rows=19 width=96) (actual time=0.020..0.027 rows=23 loops=1)
+   Recheck Cond: ((resource_id = 'fc3602d7-ae9c-10bb-5ada-e3a4cafd4635'::uuid) AND (during && '["2026-06-01 00:00:00+00","2026-06-08 00:00:00+00")'::tstzrange) AND (status = 'confirmed'::text))
+   Heap Blocks: exact=23
+   Buffers: shared hit=28
+   ->  Bitmap Index Scan on ix_reservations_resource_during  (cost=0.00..4.48 rows=19 width=0) (actual time=0.017..0.017 rows=23 loops=1)
+         Index Cond: ((resource_id = 'fc3602d7-ae9c-10bb-5ada-e3a4cafd4635'::uuid) AND (during && '["2026-06-01 00:00:00+00","2026-06-08 00:00:00+00")'::tstzrange))
+         Buffers: shared hit=5
+ Planning Time: 0.070 ms
+ Execution Time: 0.035 ms
+
+
+=== EXPLAIN — EF Core statement, generic plan ===
+                                                                QUERY PLAN                                                                
+------------------------------------------------------------------------------------------------------------------------------------------
+ Bitmap Heap Scan on reservations r  (cost=4.54..100.59 rows=25 width=96) (actual time=0.021..0.028 rows=23 loops=1)
+   Recheck Cond: ((resource_id = $1) AND (during && $2) AND (status = 'confirmed'::text))
+   Heap Blocks: exact=23
+   Buffers: shared hit=28
+   ->  Bitmap Index Scan on ix_reservations_resource_during  (cost=0.00..4.54 rows=25 width=0) (actual time=0.017..0.017 rows=23 loops=1)
+         Index Cond: ((resource_id = $1) AND (during && $2))
+         Buffers: shared hit=5
+ Planning Time: 0.081 ms
+ Execution Time: 0.036 ms
+
