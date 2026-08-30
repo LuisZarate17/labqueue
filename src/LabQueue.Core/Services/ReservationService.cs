@@ -3,6 +3,7 @@ using LabQueue.Core.Entities;
 using LabQueue.Core.Enums;
 using LabQueue.Core.Time;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 
 namespace LabQueue.Core.Services;
 
@@ -101,7 +102,28 @@ public sealed class ReservationService(LabQueueDbContext db)
         };
 
         db.Reservations.Add(reservation);
-        await db.SaveChangesAsync(ct);
+
+        try
+        {
+            await db.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateException e) when (e.InnerException is PostgresException
+        {
+            SqlState: PostgresErrorCodes.ExclusionViolation
+        })
+        {
+            // The overlap check above is a SELECT followed by an INSERT with nothing
+            // holding the gap. A concurrent caller can pass the same check and insert
+            // first, so the check being clean does not mean the slot is still free by the
+            // time this row lands. reservations_no_overlap is what actually enforces it;
+            // this branch reports the loss the same way the check above would have.
+            db.Entry(reservation).State = EntityState.Detached;
+
+            return BookingResult.Rejected(
+                BookingOutcome.ReservationConflict,
+                $"Resource {resource.Code} was booked for an overlapping window by another "
+                + "request while this one was in flight.");
+        }
 
         return BookingResult.Created(reservation);
     }

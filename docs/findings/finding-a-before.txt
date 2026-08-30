@@ -1,0 +1,59 @@
+labqueue — Finding A, BEFORE
+============================
+
+Captured   : 2026-08-30 22:55:16Z .. 22:55:17Z
+Commit     : b0165ca65f5eed56d1e1f08e2d437686f406696d (booking path unfixed)
+Host       : Ryzen 7 9700X, 32 GB DDR5, Docker Desktop (WSL2)
+Schema     : no exclusion constraint on reservations
+Script     : loadtest/race.js — 50 VUs, 1 iteration each, same resource, same window
+
+  resource : 5eb705d4-7674-7c14-a444-028d5a22d66c
+  window   : 2028-03-31T15:00:00Z .. 2028-03-31T17:00:00Z  (past the seed's end, so free)
+
+What happens
+------------
+ReservationService.BookAsync SELECTs for an overlapping confirmed reservation and then
+INSERTs if it found none. Nothing holds the gap between the two statements — no
+transaction, no lock. Under READ COMMITTED, the Postgres default and what EF Core gives
+you, every concurrent caller reads the same empty result and every one of them inserts.
+
+Result
+------
+  201 Created  : 50
+  409 Conflict : 0
+
+Fifty confirmed reservations for one two-hour slot on one instrument. Not "occasionally
+two" — every single request won.
+
+  confirmed rows in that window ....... 50
+  overlapping confirmed pairs ......... 1225      (= C(50,2): every pair overlaps)
+
+Sample, all carrying byte-identical windows:
+
+  reservation_a                          reservation_b                          during
+  01a054e2-5f55-74c1-81c7-a1e61ad5de52   01a054e2-5f55-7e5c-8480-9fbb762eff55   ["2028-03-31 15:00:00+00","2028-03-31 17:00:00+00")
+  01a054e2-5f55-74c1-81c7-a1e61ad5de52   01a054e2-5f56-78c7-bb55-407c45535af6   ["2028-03-31 15:00:00+00","2028-03-31 17:00:00+00")
+  01a054e2-5f55-74c1-81c7-a1e61ad5de52   01a054e2-5f56-77a3-a508-7b780af3eec0   ["2028-03-31 15:00:00+00","2028-03-31 17:00:00+00")
+  01a054e2-5f55-74c1-81c7-a1e61ad5de52   01a054e2-5f55-752b-9322-70a0d344c16e   ["2028-03-31 15:00:00+00","2028-03-31 17:00:00+00")
+  01a054e2-5f55-74c1-81c7-a1e61ad5de52   01a054e2-5f55-7b14-b5dc-d778b81e0167   ["2028-03-31 15:00:00+00","2028-03-31 17:00:00+00")
+
+Query used, scoped to the one resource on purpose — unscoped it is a self-join over
+500k rows with no index to help it and it does not return:
+
+  SELECT a.id, b.id, a.during FROM reservations a JOIN reservations b
+    ON a.resource_id = b.resource_id AND a.id < b.id AND a.during && b.during
+  WHERE a.status='confirmed' AND b.status='confirmed' AND a.resource_id = '<target>';
+
+On the conflict counter
+-----------------------
+reservations.conflicts.total does NOT move during this run, and that is the point rather
+than a gap in the instrumentation: the counter increments when the overlap check rejects a
+booking, and here it rejected nothing. The metric is flat because the bug is total. It
+spikes to 49 after the fix — see finding-a-after.txt.
+
+What this run is not
+--------------------
+k6 has no barrier primitive and VU startup staggers, so this is load shape and telemetry,
+not the proof. The proof is the xUnit Barrier test in
+tests/LabQueue.Tests/ConcurrentBookingTests.cs, which releases fifty in-process threads at
+once and was recorded failing 5/5 in finding-a-repro.txt before this fix existed.

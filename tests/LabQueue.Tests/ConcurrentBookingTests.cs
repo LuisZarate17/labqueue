@@ -25,7 +25,7 @@ public class ConcurrentBookingTests(LabQueueApiFixture fixture) : IClassFixture<
     private static readonly DateTimeOffset Start = new(2027, 12, 1, 10, 0, 0, TimeSpan.Zero);
     private static readonly DateTimeOffset End = Start.AddHours(2);
 
-    [Fact(Skip = "Finding A — un-skip in Phase 6, after the exclusion constraint lands")]
+    [Fact]
     public async Task Fifty_concurrent_bookings_for_one_slot_yield_exactly_one_reservation()
     {
         var resourceId = await fixture.CreateResourceAsync();

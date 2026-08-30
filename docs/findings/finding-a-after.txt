@@ -1,0 +1,66 @@
+labqueue — Finding A, AFTER
+===========================
+
+Captured   : 2026-08-30 22:57:48Z .. 22:57:50Z
+Commit     : b0165ca65f5eed56d1e1f08e2d437686f406696d (plus AddReservationOverlapConstraint and the 23P01 branch, uncommitted
+             at capture)
+Host       : Ryzen 7 9700X, 32 GB DDR5, Docker Desktop (WSL2)
+Script     : loadtest/race.js — identical to the before run
+
+  resource : 5eb705d4-7674-7c14-a444-028d5a22d66c   (same instrument)
+  window   : 2028-03-31T17:00:00Z .. 2028-03-31T19:00:00Z   (fresh — see note below)
+
+The fix
+-------
+  ALTER TABLE reservations
+    ADD CONSTRAINT reservations_no_overlap
+    EXCLUDE USING gist (resource_id WITH =, during WITH &&)
+    WHERE (status = 'confirmed');
+
+Partial on 'confirmed' so cancelling frees the slot. Application side, BookAsync catches
+PostgresException with SqlState 23P01 around SaveChangesAsync and returns the same
+ReservationConflict outcome the pre-insert check returns, so the caller sees 409 either
+way. The check was not removed: it still answers the uncontended case without a round trip
+to a failed insert.
+
+Result
+------
+  201 Created  : 1
+  409 Conflict : 49
+
+  confirmed rows in that window ....... 1
+  overlapping confirmed pairs, whole table ... 0
+
+Applying the constraint to the seed is itself evidence: ADD CONSTRAINT ... EXCLUDE
+validates every existing row, and the full 500,942-row seed loaded against a live
+constraint without a single violation.
+
+Conflict counter
+----------------
+reservations.conflicts.total goes from flat to 49 across this run — the metric that reads
+as nothing before the fix is the metric that shows the fix working. Grafana window to
+inspect, deployment_environment="local":
+
+  2026-08-30T22:57:45Z .. 2026-08-30T22:58:15Z
+
+OTEL_METRIC_EXPORT_INTERVAL is 15s, so the increment lands within one interval of 22:57:50Z.
+
+Concurrency test
+----------------
+tests/LabQueue.Tests/ConcurrentBookingTests.cs was committed skipped in phase 03 and
+recorded failing 5/5 when un-skipped, with 29 / 41 / 48 / 48 / 46 confirmed reservations
+where one was expected (finding-a-repro.txt). It is now un-skipped and passing:
+
+  Passed!  Failed: 0, Passed: 28, Skipped: 0, Total: 28, Duration: 6 s
+
+Nothing else changed
+--------------------
+scripts/gate02.sh, the 24-check HTTP oracle for auth and all five booking rules, still
+reports 24 passed / 0 failed. The 23P01 branch does not alter single-request behaviour;
+it only decides who loses a race that previously had no losers.
+
+A note on the window
+--------------------
+race.js derives a fresh window per run from the current minute. Reusing the before run's
+window would hand all fifty VUs a legitimate 409 against the row that already exists,
+which is indistinguishable from the constraint working and would prove nothing.
