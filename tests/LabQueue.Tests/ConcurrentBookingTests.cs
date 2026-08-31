@@ -10,13 +10,15 @@ namespace LabQueue.Tests;
 /// Under READ COMMITTED, requests that run the SELECT before any of them has committed its
 /// INSERT all see an empty result and all insert. One slot, many reservations.
 ///
-/// This test is committed skipped and fails when un-skipped. That ordering is deliberate: a
+/// This test was committed skipped, before the fix existed, and recorded failing 5/5 — 29, 41,
+/// 48, 48 and 46 confirmed reservations where one was expected. That ordering was the point: a
 /// concurrency test written after the fix proves nothing, because nothing establishes that it
-/// ever exercised the race. Run it with
+/// ever exercised the race. The recorded failure is in docs/findings/finding-a-repro.txt.
 ///
-///     ./scripts/dev-test.ps1 -Unskip -Filter Fifty_concurrent -Repeat 5
-///
-/// The recorded failure is in docs/findings/finding-a-repro.txt.
+/// It is un-skipped and passing now. What turned it green is reservations_no_overlap, the
+/// partial GiST exclusion constraint — not the SELECT above, which still cannot see a
+/// concurrent uncommitted INSERT. BookAsync catches the exclusion violation and reports it as
+/// the same conflict the check would have.
 /// </summary>
 public class ConcurrentBookingTests(LabQueueApiFixture fixture) : IClassFixture<LabQueueApiFixture>
 {
