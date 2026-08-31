@@ -4,11 +4,13 @@ using LabQueue.Api.Auth;
 using LabQueue.Api.Endpoints;
 using LabQueue.Api.Infrastructure;
 using LabQueue.Api.Observability;
+using LabQueue.Api.OpenApi;
 using LabQueue.Core.Data;
 using LabQueue.Core.Services;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
+using Scalar.AspNetCore;
 using Serilog;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -28,6 +30,7 @@ builder.Services.AddSingleton<PasswordHashing>();
 builder.Services.AddSingleton<JwtTokenService>();
 builder.Services.AddScoped<ReservationService>();
 builder.Services.AddValidatorsFromAssemblyContaining<Program>();
+builder.Services.AddOpenApi(options => options.AddDocumentTransformer<BearerSecuritySchemeTransformer>());
 
 var jwt = builder.Configuration.GetSection(JwtOptions.SectionName).Get<JwtOptions>() ?? new JwtOptions();
 if (string.IsNullOrWhiteSpace(jwt.Key) || Encoding.UTF8.GetByteCount(jwt.Key) < 32)
@@ -80,6 +83,23 @@ app.UseStatusCodePages();
 app.UseAuthentication();
 app.UseAuthorization();
 
+// Served in every environment, Production included, and deliberately not behind
+// app.Environment.IsDevelopment(). The hosted deployment is the only reason this API is
+// public at all, and docs that work on a developer machine while the live URL 404s would be
+// the same gap this closes, moved somewhere harder to notice.
+app.MapOpenApi();
+app.MapScalarApiReference("/docs", options => options
+    .WithTitle("labqueue API")
+    // Scalar serves its bundle from assets embedded in the package; only the default web
+    // fonts come from a CDN. Dropping those means the page renders with nothing leaving the
+    // origin, which is what a free-tier deploy in front of an unknown network wants.
+    .DisableDefaultFonts()
+    // Keeps a pasted token across navigations. It is a bearer token in localStorage:
+    // acceptable here because it lasts two hours, the published account is a member, and
+    // the same credentials are printed at / anyway.
+    .EnablePersistentAuthentication()
+    .AddPreferredSecuritySchemes(JwtBearerDefaults.AuthenticationScheme));
+
 // The landing route exists so a stranger who clicks the live URL lands on something that
 // tells them how to use it, rather than a 404.
 app.MapGet("/", (IConfiguration configuration) =>
@@ -95,9 +115,11 @@ app.MapGet("/", (IConfiguration configuration) =>
             email = demo.Email,
             password = demo.Password,
             role = "member",
-            howTo = "POST /auth/login with these credentials, then GET /resources and "
-                    + "POST /reservations with { resourceId, from, to }. Or register your own "
-                    + "account at POST /auth/register."
+            howTo = "In a browser, open /docs: run POST /auth/login with these credentials, "
+                    + "paste the token into Authorize, then GET /resources and POST /reservations "
+                    + "with { resourceId, from, to }. Send that last one twice — the second is the "
+                    + "409. From a terminal the same sequence works against these paths directly. "
+                    + "Or register your own account at POST /auth/register."
         }
         : null;
 
@@ -107,6 +129,8 @@ app.MapGet("/", (IConfiguration configuration) =>
         description = "Lab equipment reservation API — book instruments for a window of time, "
                       + "with certification gating and maintenance windows.",
         source = "https://github.com/LuisZarate17/labqueue",
+        docs = "/docs",
+        openapi = "/openapi/v1.json",
         health = "/health",
         demo = demoCredentials,
         note = "Hosted on free tiers. The first request after a period of inactivity has to wake "
