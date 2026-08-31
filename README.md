@@ -69,6 +69,12 @@ Overlapping confirmed pairs across the whole table: **0**. The concurrency test 
 committed skipped in phase 03 — recorded failing 5/5 with 29 / 41 / 48 / 48 / 46 confirmed
 rows where one was expected — is now un-skipped and green in CI.
 
+![Booking conflicts spiking under fifty concurrent bookings for one slot](docs/screenshots/grafana-conflict-spike.png)
+
+`reservations.conflicts.total` during that run, repeated over three minutes against the
+local rig. Every duplicate is refused by the constraint and surfaces as a `409` — the line
+going up is the fix working, not the bug happening.
+
 And the availability query, same seed and same script, before and after the index:
 
 ```
@@ -93,6 +99,12 @@ visitor block every resource for everyone after them.
 — request rate, error rate, latency percentiles, database query duration, and
 `reservations.conflicts.total`. It reads empty unless someone is actively using the demo,
 which is most of the time; the numbers that matter are committed under `docs/findings/`.
+
+![All five panels during a race run](docs/screenshots/grafana-dashboard.png)
+
+The same three minutes across all five panels. Request rate, 4xx rate and the conflict
+counter move together because those rejections *are* the conflicts; P99 latency and
+database duration rise with the contention.
 
 > **Cold start: about 22 seconds.** Both tiers sleep when idle — Render stops the container
 > after 15 minutes, Neon scales compute to zero after 5. The first request wakes both, and
