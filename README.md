@@ -35,6 +35,13 @@ reservation overlaps a window. EF Core's foreign-key index covers the first half
 the plan found all 2,454 reservations for the resource and discarded 2,431 of them in a
 heap filter to return 23. Fixed with a GiST index over `(resource_id, during)`.
 
+That index is no longer in the tree, and deliberately so: the exclusion constraint added
+for Finding A builds its own GiST index over the same two columns with the same partial
+predicate, which made the standalone one redundant. It was dropped and the query re-planned
+to confirm nothing regressed — it now runs on `reservations_no_overlap` at the same speed.
+So the migration history shows this index created and then dropped, and both steps are the
+point.
+
 The query got 27× faster; the HTTP request around it got 2.1×. JWT validation, EF
 materialisation and serialisation were never the index's to fix, so **2.1× is the honest
 headline** — see [Limitations](#limitations).
