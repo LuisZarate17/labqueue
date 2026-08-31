@@ -15,11 +15,53 @@ public static class ReservationEndpoints
 {
     public static IEndpointRouteBuilder MapReservationEndpoints(this IEndpointRouteBuilder app)
     {
-        var group = app.MapGroup("/reservations").WithTags("Reservations").RequireAuthorization();
+        var group = app.MapGroup("/reservations")
+                       .WithTags("Reservations")
+                       .RequireAuthorization()
+                       .ProducesProblem(StatusCodes.Status401Unauthorized);
 
-        group.MapPost("/", BookAsync).WithValidation<CreateReservationRequest>();
-        group.MapGet("/", ListMineAsync);
-        group.MapDelete("/{id:guid}", CancelAsync);
+        group.MapPost("/", BookAsync)
+             .WithValidation<CreateReservationRequest>()
+             .WithName("BookReservation")
+             .WithSummary("Book an instrument for a window")
+             .WithDescription(
+                 "Five rules, enforced in this order:\n\n"
+                 + "1. the resource exists (404) and is active (409)\n"
+                 + "2. the window is well formed — 'to' after 'from', between 15 minutes and "
+                 + "8 hours long (400)\n"
+                 + "3. the caller holds the resource's required certification, unexpired (403)\n"
+                 + "4. no maintenance window overlaps (409)\n"
+                 + "5. no confirmed reservation overlaps (409)\n\n"
+                 + "Send the same request twice to see rule 5. The second one is refused by "
+                 + "reservations_no_overlap, a partial GiST exclusion constraint, rather than by "
+                 + "the SELECT that precedes the insert — which is the point of Finding A in the "
+                 + "repository README. Cancelling frees the slot, because the constraint is "
+                 + "partial on status = 'confirmed'.")
+             .Produces<ReservationResponse>(StatusCodes.Status201Created)
+             .ProducesProblem(StatusCodes.Status403Forbidden)
+             .ProducesProblem(StatusCodes.Status404NotFound)
+             .ProducesProblem(StatusCodes.Status409Conflict);
+
+        group.MapGet("/", ListMineAsync)
+             .WithName("ListMyReservations")
+             .WithSummary("List your own reservations")
+             .WithDescription(
+                 "Scoped to the token's user — there is no route to anyone else's. Optionally "
+                 + "filtered by status, 'confirmed' or 'cancelled'.")
+             .Produces<IReadOnlyList<ReservationResponse>>()
+             .ProducesValidationProblem();
+
+        group.MapDelete("/{id:guid}", CancelAsync)
+             .WithName("CancelReservation")
+             .WithSummary("Cancel a reservation and free the slot")
+             .WithDescription(
+                 "Cancellable by the person who made it, or by an admin. The row is kept and "
+                 + "marked cancelled rather than deleted, and the slot becomes bookable again "
+                 + "immediately.")
+             .Produces(StatusCodes.Status204NoContent)
+             .ProducesProblem(StatusCodes.Status403Forbidden)
+             .ProducesProblem(StatusCodes.Status404NotFound)
+             .ProducesProblem(StatusCodes.Status409Conflict);
 
         return app;
     }

@@ -14,11 +14,42 @@ public static class ResourceEndpoints
 
     public static IEndpointRouteBuilder MapResourceEndpoints(this IEndpointRouteBuilder app)
     {
-        var group = app.MapGroup("/resources").WithTags("Resources").RequireAuthorization();
+        var group = app.MapGroup("/resources")
+                       .WithTags("Resources")
+                       .RequireAuthorization()
+                       .ProducesProblem(StatusCodes.Status401Unauthorized);
 
-        group.MapGet("/", ListAsync);
-        group.MapGet("/{id:guid}", GetAsync);
-        group.MapGet("/{id:guid}/availability", GetAvailabilityAsync);
+        group.MapGet("/", ListAsync)
+             .WithName("ListResources")
+             .WithSummary("List bookable instruments")
+             .WithDescription(
+                 "Active resources only unless includeRetired is set. Start here: the id of a "
+                 + "resource is what POST /reservations wants.")
+             .Produces<IReadOnlyList<ResourceResponse>>();
+
+        group.MapGet("/{id:guid}", GetAsync)
+             .WithName("GetResource")
+             .WithSummary("Fetch one instrument")
+             .WithDescription(
+                 "requiredCertification is the gate: a resource that has one can only be booked "
+                 + "by a caller holding it and unexpired, which an admin grants.")
+             .Produces<ResourceResponse>()
+             .ProducesProblem(StatusCodes.Status404NotFound);
+
+        group.MapGet("/{id:guid}/availability", GetAvailabilityAsync)
+             .WithName("GetResourceAvailability")
+             .WithSummary("What is already taken in a window")
+             .WithDescription(
+                 "from and to are both required, and 'to' must be later than 'from'. The window "
+                 + $"may not exceed {MaximumAvailabilityWindow.TotalDays:0} days.\n\n"
+                 + "Returns what is busy, not what is free: the confirmed reservations and the "
+                 + "maintenance windows overlapping the range. The caller works out the gaps, "
+                 + "because computing them here would mean computing them in the database on "
+                 + "every request.\n\n"
+                 + "This is the query behind Finding B — see the repository README.")
+             .Produces<AvailabilityResponse>()
+             .ProducesValidationProblem()
+             .ProducesProblem(StatusCodes.Status404NotFound);
 
         return app;
     }

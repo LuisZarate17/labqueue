@@ -138,11 +138,16 @@ app.MapGet("/", (IConfiguration configuration) =>
     });
 })
    .AllowAnonymous()
-   .WithName("Landing");
+   .WithName("Landing")
+   .WithTags("Meta")
+   .WithSummary("What this API is and how to start");
 
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }))
    .AllowAnonymous()
-   .WithName("Health");
+   .WithName("Health")
+   .WithTags("Meta")
+   .WithSummary("Liveness check")
+   .WithDescription("What Render's health check and the container HEALTHCHECK poll.");
 
 app.MapAuthEndpoints();
 app.MapResourceEndpoints();
