@@ -231,18 +231,6 @@ the absolute throughput would not survive a real network or a shared host.
 **Cold starts on the demo.** ~22 seconds after idle, on both tiers. Fine for a portfolio
 link, not fine for anything real.
 
-## Status
-
-| Phase | |
-|---|---|
-| 01 — Domain model & migrations | ✅ |
-| 02 — API & auth | ✅ |
-| 03 — Tests & CI | ✅ |
-| 04 — Containerize & deploy | ✅ |
-| 05 — Observability | ✅ |
-| 06 — Load test & findings | ✅ |
-| 07 — Write-up | ✅ |
-
 ## License
 
 MIT
