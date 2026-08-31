@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using LabQueue.Tests.Infrastructure;
 
 namespace LabQueue.Tests;
@@ -102,13 +103,27 @@ public class DocumentationTests(LabQueueApiFixture fixture) : IClassFixture<LabQ
         Assert.True(wrong.Count == 0, string.Join(Environment.NewLine, wrong));
     }
 
+    /// <summary>
+    /// Serving HTML is not enough to call this working. The page is a shell that fetches the
+    /// document by a URL baked into its bootstrap config, and if that URL stops resolving the
+    /// page still returns 200 and simply renders nothing. So follow it.
+    /// </summary>
     [Fact]
-    public async Task The_docs_page_is_served()
+    public async Task The_docs_page_is_served_and_points_at_a_document_that_resolves()
     {
         var response = await fixture.Anonymous.GetAsync("/docs");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         Assert.Equal("text/html", response.Content.Headers.ContentType?.MediaType);
+
+        var html = await response.Content.ReadAsStringAsync();
+        var source = Regex.Match(html, @"""sources"":\[\{[^\]]*?""url"":""(?<url>[^""]+)""");
+        Assert.True(source.Success, $"No OpenAPI source URL in the docs page:{Environment.NewLine}{html}");
+
+        // Scalar resolves a relative source against the origin plus its base path, which is
+        // empty when the app is served from the root - so this is the URL the browser fetches.
+        var documentUrl = new Uri(new Uri("http://localhost/"), source.Groups["url"].Value).AbsolutePath;
+        Assert.Equal(HttpStatusCode.OK, (await fixture.Anonymous.GetAsync(documentUrl)).StatusCode);
     }
 
     private async Task<JsonDocument> GetDocumentAsync()
