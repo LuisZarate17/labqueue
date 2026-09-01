@@ -54,7 +54,3 @@ loadtest/results/
 ## Honesty about the constructed bugs belongs in README.md instead — see plan §1.4.
 docs/labqueue-implementation-plan.md
 docs/handoffs/
-
-## Claude Code
-.claude/
-CLAUDE.md
