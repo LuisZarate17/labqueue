@@ -29,6 +29,7 @@ public static class ReservationEndpoints
         ClaimsPrincipal principal,
         ReservationService reservations,
         LabQueueMetrics metrics,
+        HttpResponse response,
         CancellationToken ct)
     {
         var result = await reservations.BookAsync(
@@ -38,8 +39,19 @@ public static class ReservationEndpoints
         {
             // Only this outcome. ResourceNotActive and MaintenanceConflict are 409s as well,
             // but they are not the overlap check, and counting them here would blunt the
-            // signal this instrument exists to carry.
+            // signal this instrument exists to carry. A deadlock is contention on the same
+            // constraint but not a rejection by it, so it gets its own instrument below.
             metrics.ReservationConflict();
+        }
+
+        if (result.Outcome == BookingOutcome.DeadlockAborted)
+        {
+            metrics.ReservationDeadlock();
+
+            // 503 rather than 409. Retrying this request may well succeed - the transaction
+            // was killed before it could establish whether the window was taken - and a
+            // Retry-After is the only honest thing to say about a slot we never got to read.
+            response.Headers.RetryAfter = "1";
         }
 
         return result.Outcome switch
@@ -70,6 +82,10 @@ public static class ReservationEndpoints
             BookingOutcome.ReservationConflict => Results.Problem(
                 title: "Reservation conflict", detail: result.Detail,
                 statusCode: StatusCodes.Status409Conflict),
+
+            BookingOutcome.DeadlockAborted => Results.Problem(
+                title: "Booking could not be confirmed", detail: result.Detail,
+                statusCode: StatusCodes.Status503ServiceUnavailable),
 
             _ => Results.Problem(statusCode: StatusCodes.Status500InternalServerError)
         };

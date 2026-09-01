@@ -1,0 +1,100 @@
+labqueue — Finding A′ deadlock capture
+=====================================
+
+Captured   : 2026-08-31
+Commit     : 29ef497 (before any OpenAPI work — this is not a regression from later changes)
+Test       : LabQueue.Tests.ConcurrentBookingTests
+             .Fifty_concurrent_bookings_for_one_slot_yield_exactly_one_reservation
+Host       : Docker Desktop (WSL2), Windows 11
+Database   : postgres:17, started per test class by Testcontainers
+Runtime    : .NET SDK 10 container; Smart App Control blocks host builds on this machine
+Frequency  : 22nd of 40 consecutive full-suite runs. Never reproduces when the test is run
+             alone — a single test class starts the process fresh, and the run completes in
+             ~570ms instead of 30s.
+
+What this file is
+-----------------
+The exclusion constraint from Finding A closes the booking race, but it does not decide how
+Postgres resolves the contention it creates. Usually: one insert commits and the rest raise
+23P01. Sometimes the waiters form a cycle and Postgres resolves it as a deadlock instead.
+BookAsync caught only 23P01, so those became 500s.
+
+Every INSERT below is timed at almost exactly 1,002ms — Postgres's default deadlock_timeout
+of 1s — so each waiter sat the full second before the detector fired.
+
+Test failure
+------------
+  [xUnit.net 00:00:34.44]     LabQueue.Tests.ConcurrentBookingTests.Fifty_concurrent_bookings_for_one_slot_yield_exactly_one_reservation [FAIL]
+    Failed LabQueue.Tests.ConcurrentBookingTests.Fifty_concurrent_bookings_for_one_slot_yield_exactly_one_reservation [30 s]
+    Error Message:
+     
+  50 simultaneous POST /reservations, one resource, one window.
+  
+    expected          : 201 x1, 409 x49, 1 confirmed row
+    actual            : 500 InternalServerError x50
+    confirmed rows    : 0
+    release spread    : 1.815 ms across 50 threads
+  
+    Stack Trace:
+       at LabQueue.Tests.ConcurrentBookingTests.RaceAsync(Guid resourceId) in /src/tests/LabQueue.Tests/ConcurrentBookingTests.cs:line 133
+     at LabQueue.Tests.ConcurrentBookingTests.Fifty_concurrent_bookings_for_one_slot_yield_exactly_one_reservation() in /src/tests/LabQueue.Tests/ConcurrentBookingTests.cs:line 42
+  --- End of stack trace from previous location ---
+
+SQLSTATE distribution across the run
+------------------------------------
+  99  SqlState: 40P01
+   0  SqlState: 23P01   (no exclusion violation was raised at all)
+
+  Wrapper types, showing why the existing catch could not fire:
+
+  150  System.InvalidOperationException
+  150  Microsoft.EntityFrameworkCore.DbUpdateException
+   99  Npgsql.PostgresException
+
+  These are occurrences in the log, not one per request: EF Core logs the failure once at
+  the command and once at SaveChanges, and the exception handler renders the chain again.
+  Fifty requests failed. What matters is the ratio — every failure is 40P01, none is 23P01,
+  and every one arrives wrapped in InvalidOperationException.
+
+Exception, as captured
+----------------------
+  [23:46:48 ERR] An exception occurred in the database while saving changes for context type 'LabQueue.Core.Data.LabQueueDbContext'.
+  System.InvalidOperationException: An exception has been raised that is likely due to a transient failure.
+   ---> Microsoft.EntityFrameworkCore.DbUpdateException: An error occurred while saving the entity changes. See the inner exception for details.
+   ---> Npgsql.PostgresException (0x80004005): 40P01: deadlock detected
+  DETAIL: Detail redacted as it may contain sensitive data. Specify 'Include Error Detail' in the connection string to include this information.
+     at Npgsql.Internal.NpgsqlConnector.ReadMessageLong(Boolean async, DataRowLoadingMode dataRowLoadingMode, Boolean readingNotifications, Boolean isReadingPrependedMessage)
+     at System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder`1.StateMachineBox`1.System.Threading.Tasks.Sources.IValueTaskSource<TResult>.GetResult(Int16 token)
+     at Npgsql.NpgsqlDataReader.NextResult(Boolean async, Boolean isConsuming, CancellationToken cancellationToken)
+  [23:46:48 ERR] An exception occurred in the database while saving changes for context type 'LabQueue.Core.Data.LabQueueDbContext'.
+  System.InvalidOperationException: An exception has been raised that is likely due to a transient failure.
+   ---> Microsoft.EntityFrameworkCore.DbUpdateException: An error occurred while saving the entity changes. See the inner exception for details.
+   ---> Npgsql.PostgresException (0x80004005): 40P01: deadlock detected
+
+  The chain is InvalidOperationException -> DbUpdateException -> PostgresException.
+  BookAsync's clause was `catch (DbUpdateException e) when (e.InnerException is
+  PostgresException { SqlState: 23P01 })`. It fails on both counts: the SqlState is 40P01,
+  and the outer exception is not a DbUpdateException. Npgsql classifies deadlock as
+  transient, so EF Core's execution strategy wraps it — InvalidOperationException with no
+  retry policy configured, RetryLimitExceededException once a retrying strategy is out of
+  attempts. Adding 40P01 to that same clause would still not have caught it.
+
+Sample of the failing statement
+-------------------------------
+  [23:46:48 ERR] Failed executing DbCommand (1,002ms) [Parameters=[@p0='?' (DbType = Guid), @p1='?' (DbType = DateTime), @p2='?' (DbType = DateTime), @p3='?' (DbType = Object), @p4='?' (DbType = Guid), @p5='?', @p6='?' (DbType = Guid)], CommandType='Text', CommandTimeout='30']
+  INSERT INTO reservations (id, cancelled_at, created_at, during, resource_id, status, user_id)
+  VALUES (@p0, @p1, @p2, @p3, @p4, @p5, @p6); {"EventId": {"Id": 20102, "Name": "Microsoft.EntityFrameworkCore.Database.Command.CommandError"}, "SourceContext": "Microsoft.EntityFrameworkCore.Database.Command", "RequestId": "0HNO7N8FC50R8", "RequestPath": "/reservations"}
+  [23:46:48 ERR] Failed executing DbCommand (1,002ms) [Parameters=[@p0='?' (DbType = Guid), @p1='?' (DbType = DateTime), @p2='?' (DbType = DateTime), @p3='?' (DbType = Object), @p4='?' (DbType = Guid), @p5='?', @p6='?' (DbType = Guid)], CommandType='Text', CommandTimeout='30']
+
+How it was captured
+-------------------
+Server-side logs never reach scripts/dev-test.ps1's stdout — VSTest captures the app's
+console output into the .trx and nowhere else, and the script removed the container, and
+the .trx with it, in its finally block. This capture required a throwaway runner that kept
+the container. `-KeepResults` was added to dev-test.ps1 afterwards so the next occurrence
+of anything like this is readable without one.
+
+Fix
+---
+EnableRetryOnFailure on the DbContext, plus a catch matching 40P01 anywhere in the exception
+chain that returns 503 with Retry-After. See DECISIONS.md section 7.

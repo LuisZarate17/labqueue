@@ -167,3 +167,82 @@ development machine and blocks freshly built unsigned assemblies with `0x800711C
 `dotnet ef` and the test suite run inside the .NET SDK container instead. Turning Smart App
 Control off is irreversible without reinstalling Windows, which is a poor trade for a faster
 inner loop — and the container path pre-validates the Linux image that gets deployed.
+
+---
+
+## 7. The exclusion constraint needed a retry policy to be complete
+
+**Context.** Section 1 chose an exclusion constraint and ended there, as though the write
+path were finished. It was not. `reservations_no_overlap` closes the race correctly, but it
+does not decide *how* Postgres resolves the contention it creates, and the error path only
+handled one of the two answers.
+
+Fifty simultaneous inserts for one slot mostly resolve the way section 1 describes: one
+commits, forty-nine hit `23P01`, the application turns each into a `409`. Sometimes they do
+not. Each inserter takes a speculative lock and waits on the transactions it conflicts with,
+and with enough mutual waiters the wait-for graph forms a cycle. Postgres detects it after
+`deadlock_timeout` and kills a victim with `40P01`. The remaining waiters can then form new
+cycles, and it cascades — a captured run shows **99 deadlocks, zero exclusion violations,
+every insert timed at exactly 1,002ms**, and not one reservation committed.
+
+`BookAsync` caught `23P01` and nothing else, so every one of those became a `500`.
+
+**This failure mode is named in this document already.** Section 1 rejected `SERIALIZABLE`
+partly because "every caller has to handle `40001` and retry ... a caller that forgets to
+retry turns a race into a user-visible 500". The exclusion constraint was chosen over it and
+then did precisely that, one SQLSTATE over. The argument was right; it was applied to the
+alternative and not to the choice.
+
+**Why it stayed hidden.** The constraint landed with a concurrency test that proves it, and
+that test was green. Deadlock is a timing accident — roughly one full-suite run in twenty on
+the development machine, and never when the test runs alone, because a single class starts
+the process fresh. It was first mistaken for test flakiness. It is not: the same 500 is
+returned to a real caller under real contention, and it has been in the deployed API since
+the constraint landed.
+
+### Retry, on the context
+
+`EnableRetryOnFailure`, configured once on the `DbContext` rather than around the one call
+site. Same reasoning that rejected advisory locks in section 1: correctness every write path
+has to remember is correctness that will eventually be forgotten. The objection that sank
+`SERIALIZABLE` — pricing the whole application for one path — does not apply, because a
+retry policy costs nothing on requests that do not fail.
+
+The retried insert runs against a settled table, so it resolves definitively: it either wins
+the slot or loses it to `23P01` and takes the existing `409` path. That is what makes the
+concurrency test green again, and it is worth being precise about why. Mapping `40P01` to
+`409` without retrying would also have removed the `500`, and would have been worse than
+useless: fifty callers would each be told the slot was taken while nothing was booked.
+
+EF Core's execution strategy applies to every `SaveChangesAsync` in the application. That is
+safe here because no code path opens an explicit transaction — a retrying strategy requires
+user-initiated transactions to be wrapped in `CreateExecutionStrategy().ExecuteAsync(...)`,
+and there are none to wrap.
+
+### A deadlock is not a conflict
+
+The residual case — a deadlock that survives the retries — returns **`503` with a
+`Retry-After`**, not `409`, and increments its own counter rather than
+`reservations.conflicts.total`.
+
+Both halves of that are the same point. A deadlock victim is killed *before* it establishes
+whether the window was taken; no overlapping row was ever observed. Returning `409
+Reservation conflict` would assert a conflict that was never measured, and folding it into
+the conflict counter would hide it inside a number the README quotes as evidence that the
+constraint works. `reservations.deadlocks.total` counts the times the database could not
+answer the question, which is a different fact worth seeing on its own.
+
+The catch matches on the SQLSTATE anywhere in the exception chain rather than on a wrapper
+type, and deliberately not on a broad exception filter. Npgsql classifies deadlock as
+transient, so EF Core never surfaces it as a bare `DbUpdateException`: it arrives inside
+`RetryLimitExceededException` when a retrying strategy runs out of attempts, and inside
+`InvalidOperationException` when no retry policy is configured. Adding `40P01` to the
+existing `23P01` clause would not have caught it — the clause is typed on
+`DbUpdateException`, and a deadlock is never one.
+
+### What this cost
+
+Nothing at the schema level: no migration, no change to the constraint, no change to the
+five booking rules. The fix is a retry policy, one catch clause, one status code and one
+counter. The constraint was right. Its failure handling was incomplete, and the test that
+proved the constraint was also the thing that eventually found the gap.

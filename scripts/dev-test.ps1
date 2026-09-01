@@ -23,11 +23,23 @@
     inside the container*. The working tree is never modified, so the committed state
     cannot accidentally be left un-skipped.
 
+.PARAMETER KeepResults
+    Copies the container's TestResults directory out to ./TestResults before the container
+    is removed, and forces the trx logger on so there is something to copy.
+
+    Without this the .trx dies with the container in the finally block below, and with it
+    every log line the API wrote - VSTest captures the app's console output into the trx and
+    nowhere else, so nothing Serilog emits reaches this script's stdout. That is how the
+    40P01 deadlock behind DECISIONS.md section 7 stayed invisible for as long as it did: the
+    test reported "500 InternalServerError x50" and the exception explaining it was deleted
+    microseconds later. Use this on any intermittent failure before trying to reason about it.
+
 .EXAMPLE
     ./scripts/dev-test.ps1
     ./scripts/dev-test.ps1 -Task build
     ./scripts/dev-test.ps1 -Task ci        # rehearses the GitHub Actions sequence
     ./scripts/dev-test.ps1 -Unskip -Filter Fifty_concurrent -Repeat 5
+    ./scripts/dev-test.ps1 -KeepResults    # then read TestResults/*.trx for the server-side exception
 #>
 [CmdletBinding()]
 param(
@@ -40,6 +52,8 @@ param(
     [int]$Repeat = 1,
 
     [switch]$Unskip,
+
+    [switch]$KeepResults,
 
     [string]$Configuration = 'Release',
 
@@ -85,10 +99,15 @@ grep -n -B1 'Fifty_concurrent_bookings' "$reproFile" | head -4
 "@
 }
 
+# -Task ci already logs a trx. -Task test does not, so -KeepResults has to turn it on or
+# there would be nothing in the directory worth copying out.
+$resultsArg = ''
+if ($KeepResults) { $resultsArg = "--logger 'trx;LogFileName=test-results.trx' --results-directory TestResults" }
+
 switch ($Task) {
     'restore' { $command = "dotnet restore labqueue.slnx" }
     'build'   { $command = "dotnet build labqueue.slnx -c $Configuration --nologo" }
-    'test'    { $command = "dotnet test labqueue.slnx -c $Configuration --nologo $filterArg" }
+    'test'    { $command = "dotnet test labqueue.slnx -c $Configuration --nologo $filterArg $resultsArg" }
 
     # The exact sequence .github/workflows/ci.yml runs, as a local rehearsal of the runner.
     'ci' {
@@ -168,6 +187,22 @@ try {
     $exitCode = & docker inspect -f '{{.State.ExitCode}}' $cid
 }
 finally {
+    # Before the container goes, not after. This has to run even when the tests failed -
+    # especially then, since a failing run is the only one worth reading.
+    if ($KeepResults) {
+        $destination = Join-Path $repoRoot 'TestResults'
+        Remove-Item -Recurse -Force $destination -ErrorAction SilentlyContinue
+        & docker cp "${cid}:/src/TestResults" $destination 2>&1 | Out-Null
+
+        if (Test-Path $destination) {
+            Write-Host ">>> results copied to $destination" -ForegroundColor Cyan
+        }
+        else {
+            # -Task build and -Task restore produce none, which is not an error.
+            Write-Host ">>> no TestResults in the container to copy" -ForegroundColor DarkGray
+        }
+    }
+
     & docker rm -f $cid 2>&1 | Out-Null
     Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
 }

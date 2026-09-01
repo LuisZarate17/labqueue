@@ -15,6 +15,7 @@ public sealed class LabQueueMetrics
     public const string MeterName = "LabQueue";
 
     private readonly Counter<long> _reservationConflicts;
+    private readonly Counter<long> _reservationDeadlocks;
 
     public LabQueueMetrics(IMeterFactory meterFactory)
     {
@@ -28,7 +29,19 @@ public sealed class LabQueueMetrics
             "reservations.conflicts.total",
             unit: "{conflict}",
             description: "Bookings rejected because the requested window overlapped a confirmed reservation.");
+
+        // Separate from the counter above, and that separation is the point. Both are
+        // contention on reservations_no_overlap, but one is the constraint doing its job and
+        // the other is the constraint's contention being resolved as a deadlock instead.
+        // Folding them together would hide the second inside a number the README quotes.
+        _reservationDeadlocks = meter.CreateCounter<long>(
+            "reservations.deadlocks.total",
+            unit: "{deadlock}",
+            description: "Bookings abandoned because Postgres resolved the contention as a deadlock (40P01) "
+                         + "and the retries did not settle it.");
     }
 
     public void ReservationConflict() => _reservationConflicts.Add(1);
+
+    public void ReservationDeadlock() => _reservationDeadlocks.Add(1);
 }

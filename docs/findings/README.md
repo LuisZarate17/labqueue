@@ -41,6 +41,31 @@ check returns.
 Detail: [finding-a-before.txt](finding-a-before.txt) · [finding-a-after.txt](finding-a-after.txt) ·
 [finding-a-repro.txt](finding-a-repro.txt)
 
+### Finding A′ — the constraint's other failure mode
+
+Catching `23P01` was not enough. Fifty inserters contending on `reservations_no_overlap`
+usually resolve as one commit plus forty-nine exclusion violations, but the waiters can form
+a cycle instead, and Postgres then resolves the contention as a **deadlock**. `40P01` is not
+`23P01`, and it never arrives as a `DbUpdateException` — Npgsql classifies deadlock as
+transient, so EF Core wraps it — which meant the booking path returned `500`.
+
+**One captured run: 99 deadlocks, zero exclusion violations, every insert timed at exactly
+1,002ms (`deadlock_timeout`), and nothing committed.**
+
+This was found by the Finding A concurrency test itself, failing intermittently — about one
+full-suite run in twenty, and never when run alone, because a single test class starts the
+process fresh. It reproduced at `29ef497`, so it was not introduced by any later work. It
+had been live in the deployed API since the constraint landed.
+
+**Fix** — `EnableRetryOnFailure` on the context, so the deadlock victim re-runs against a
+settled table and resolves definitively; plus a catch that matches `40P01` anywhere in the
+exception chain and returns `503` with `Retry-After`. Not `409`: the victim was killed before
+it could establish whether the window was taken, and `reservations.conflicts.total` must keep
+meaning "the overlap check rejected a booking".
+
+Detail: [finding-a-prime-deadlock.txt](finding-a-prime-deadlock.txt) ·
+reasoning in [`DECISIONS.md` §7](../../DECISIONS.md)
+
 ---
 
 ## Finding B — the range predicate was never indexed

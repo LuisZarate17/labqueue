@@ -124,8 +124,51 @@ public sealed class ReservationService(LabQueueDbContext db)
                 $"Resource {resource.Code} was booked for an overlapping window by another "
                 + "request while this one was in flight.");
         }
+        catch (Exception e) when (IsDeadlock(e))
+        {
+            // Reached only after the retry policy has given up. Postgres resolves contention
+            // on reservations_no_overlap as an exclusion violation most of the time, but
+            // under enough simultaneous inserters the wait-for graph cycles and it resolves
+            // some of them as deadlocks instead. Those say nothing about whether the slot is
+            // free — this transaction was killed before it could find out — so this is not a
+            // conflict and must not be reported as one.
+            db.Entry(reservation).State = EntityState.Detached;
+
+            return BookingResult.Rejected(
+                BookingOutcome.DeadlockAborted,
+                $"The booking for {resource.Code} could not be confirmed because too many "
+                + "requests were competing for that window. The slot may still be free; "
+                + "retry the request.");
+        }
 
         return BookingResult.Created(reservation);
+    }
+
+    /// <summary>
+    /// Whether a 40P01 deadlock is anywhere in the exception's chain.
+    ///
+    /// It never arrives as a bare <see cref="DbUpdateException"/>, which is why the clause
+    /// above cannot catch it however many SqlStates are added to it. Npgsql classifies
+    /// deadlock as transient, so EF Core hands it back wrapped, and the wrapper depends on
+    /// configuration: <c>RetryLimitExceededException</c> once a retrying strategy is out of
+    /// attempts, and <c>InvalidOperationException("...likely due to a transient failure")</c>
+    /// when no retry policy is configured at all.
+    ///
+    /// Matching the SqlState rather than any wrapper type is what keeps the catch narrow.
+    /// Nothing without a 40P01 in its chain is caught, so ordinary failures still surface
+    /// as 500s.
+    /// </summary>
+    private static bool IsDeadlock(Exception exception)
+    {
+        for (var e = exception; e is not null; e = e.InnerException)
+        {
+            if (e is PostgresException { SqlState: PostgresErrorCodes.DeadlockDetected })
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     public async Task<CancellationOutcome> CancelAsync(

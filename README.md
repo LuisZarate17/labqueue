@@ -30,6 +30,17 @@ default and what EF Core gives you, every concurrent caller read the same empty 
 every one of them inserted. Not occasionally two: *every* request won. Fixed with a GiST
 exclusion constraint, partial on `status = 'confirmed'` so cancelling frees the slot.
 
+**And that fix was not finished.** The constraint closes the race, but it does not decide
+how Postgres *resolves* the contention it creates. Usually one insert commits and the rest
+take a clean `23P01` exclusion violation. Sometimes the waiters form a cycle instead and
+Postgres kills them as deadlocks — `40P01` — which the error path did not handle, so they
+came back as `500`s. One captured run: **99 deadlocks, zero exclusion violations, nothing
+committed.** Found by this project's own concurrency test, roughly one full-suite run in
+twenty, and live in the deployed API from the day the constraint landed. The fix is a retry
+policy, so the victim re-runs against a settled table and resolves properly; a deadlock that
+survives the retries now returns `503` and not a `409`, because the transaction was killed
+before it could establish whether the slot was free. [`DECISIONS.md` §7](DECISIONS.md).
+
 **Finding B** — the availability query filters on `resource_id` **and** on whether a
 reservation overlaps a window. EF Core's foreign-key index covers the first half only, so
 the plan found all 2,454 reservations for the resource and discarded 2,431 of them in a
