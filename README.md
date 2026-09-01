@@ -15,6 +15,8 @@ An ASP.NET Core reservation API over Postgres, used as the vehicle for two measu
 database findings. Each was measured, then fixed, then measured again, with load-test
 numbers and query plans committed alongside the code.
 
+**[Live API reference](https://labqueue-api.onrender.com/docs)** · **[Dashboard](https://microcactus109.grafana.net/public-dashboards/25963f6e626440e0a4edd6664a40c038)** · [Findings](docs/findings/README.md) · [Decisions](DECISIONS.md)
+
 ## What was found
 
 | | before | after | |
