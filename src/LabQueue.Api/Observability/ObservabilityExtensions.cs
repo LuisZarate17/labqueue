@@ -18,8 +18,8 @@ public static class ObservabilityExtensions
     ///
     /// The absent-endpoint case is not a detail. Registering the exporter unconditionally
     /// points it at localhost:4317 by default, where it retries and stalls shutdown; the
-    /// test suite builds a host per test class, so that cost lands twenty-eight times and
-    /// CI pays for telemetry nobody collects. Local runs without a .env behave the same way.
+    /// test suite builds a host per test class, so that cost lands once per test and CI pays
+    /// for telemetry nobody collects. Local runs without a .env behave the same way.
     /// </summary>
     public static WebApplicationBuilder AddLabQueueObservability(this WebApplicationBuilder builder)
     {
@@ -63,7 +63,14 @@ public static class ObservabilityExtensions
                     // The container healthcheck polls /health every 30 seconds and Render polls
                     // it too. Those are worth counting and not worth tracing. Metrics keep the
                     // route so a panel can include or exclude it; traces just drop it.
-                    options.Filter = context => context.Request.Path != "/health")
+                    //
+                    // The docs page and its document are dropped for the same reason: a reviewer
+                    // clicking around /docs would otherwise spend a 50GB free trace quota on
+                    // page loads. The API calls they make from it are still traced.
+                    options.Filter = context =>
+                        context.Request.Path != "/health"
+                        && !context.Request.Path.StartsWithSegments("/docs")
+                        && !context.Request.Path.StartsWithSegments("/openapi"))
                 .AddNpgsql()
                 .AddOtlpExporter());
 

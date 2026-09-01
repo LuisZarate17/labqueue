@@ -12,14 +12,45 @@ public static class AdminEndpoints
 {
     public static IEndpointRouteBuilder MapAdminEndpoints(this IEndpointRouteBuilder app)
     {
-        var admin = app.MapGroup(string.Empty).WithTags("Admin").RequireAuthorization("admin");
+        // These need an admin token, and the published demo account is a member, so they are
+        // documented but not callable from the hosted demo. That is deliberate: a maintenance
+        // window blocks bookings on a resource, so a public admin login would let any visitor
+        // take the demo down for everyone after them.
+        var admin = app.MapGroup(string.Empty)
+                       .WithTags("Admin")
+                       .RequireAuthorization("admin")
+                       .ProducesProblem(StatusCodes.Status401Unauthorized)
+                       .ProducesProblem(StatusCodes.Status403Forbidden);
 
         admin.MapPost("/resources", CreateResourceAsync)
-             .WithValidation<CreateResourceRequest>();
+             .WithValidation<CreateResourceRequest>()
+             .WithName("CreateResource")
+             .WithSummary("Add an instrument")
+             .WithDescription("Codes are unique. Resources are created active.")
+             .Produces<ResourceResponse>(StatusCodes.Status201Created)
+             .ProducesProblem(StatusCodes.Status409Conflict);
+
         admin.MapPost("/maintenance-windows", CreateMaintenanceWindowAsync)
-             .WithValidation<CreateMaintenanceWindowRequest>();
+             .WithValidation<CreateMaintenanceWindowRequest>()
+             .WithName("CreateMaintenanceWindow")
+             .WithSummary("Take an instrument out of service for a window")
+             .WithDescription(
+                 "Booking rule 4. Note this does not cancel reservations already confirmed in "
+                 + "the window, and two concurrent requests can still book either side of a "
+                 + "window being created — exclusion constraints are single-table, and this "
+                 + "rule spans two. See Limitations in the repository README.")
+             .Produces<MaintenanceWindowResponse>(StatusCodes.Status201Created)
+             .ProducesProblem(StatusCodes.Status404NotFound);
+
         admin.MapPost("/users/{id:guid}/certifications", GrantCertificationAsync)
-             .WithValidation<GrantCertificationRequest>();
+             .WithValidation<GrantCertificationRequest>()
+             .WithName("GrantCertification")
+             .WithSummary("Grant a certification to a user")
+             .WithDescription(
+                 "Booking rule 3. Idempotent: granting one already held updates its expiry. "
+                 + "Omit expiresAt for a grant that does not lapse.")
+             .Produces<UserCertificationResponse>()
+             .ProducesProblem(StatusCodes.Status404NotFound);
 
         return app;
     }

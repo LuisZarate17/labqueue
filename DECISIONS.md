@@ -170,6 +170,7 @@ inner loop — and the container path pre-validates the Linux image that gets de
 
 ---
 
+<<<<<<< HEAD
 ## 7. The exclusion constraint needed a retry policy to be complete
 
 **Context.** Section 1 chose an exclusion constraint and ended there, as though the write
@@ -271,3 +272,62 @@ five booking rules, and no change to any write path but this one. A bounded retr
 The constraint was right. Its failure handling was incomplete, the test that proved the
 constraint was also the thing that found the gap, and the first fix attempted for it was
 wrong in a way only the same test could show.
+=======
+## 8. Browsable docs, served in Production
+
+**Context.** The gate for this project was "a stranger can complete a booking through the
+live URL". That was true only for a stranger with a terminal: there was no OpenAPI document
+and no UI, so `GET /` handed visitors a `howTo` string telling them to go write HTTP requests
+by hand.
+
+**Scalar over Swagger UI.** .NET 10 emits OpenAPI 3.1 by default. Swagger UI's 3.1 support
+arrived late and is the historic weak spot of that stack, so choosing it would have meant
+either trusting that support or pinning `OpenApiVersion` back to 3.0 and downgrading the
+document to suit the viewer. Scalar consumes 3.1 natively. It also serves its bundle from
+assets embedded in the package — with `DisableDefaultFonts()` the page renders with nothing
+leaving the origin, which is what a free-tier deploy in front of an unknown reviewer's
+network wants. MIT, no NuGet dependencies. ReDoc was ruled out for having no try-it-out,
+which makes the 409 step impossible.
+
+**No `IsDevelopment()` gate, and no configuration toggle.** The hosted deployment is the
+only reason this API is public. Docs behind the template's environment check would work on
+every developer machine and 404 on the one URL that matters, which is the same gap wearing
+a disguise; a toggle is that failure with an extra step. The costs are named and accepted:
+two more anonymous endpoints disclosing the route table and DTO shapes, which a public
+repository already discloses; one lazy document generation per cold start, inside a wake
+already dominated by Render and Neon; and docs traffic excluded from traces, as `/health`
+already was.
+
+**The bearer scheme is applied from a document transformer, not an operation transformer.**
+An operation transformer reading endpoint metadata is the obvious shape and is what the
+ASP.NET Core documentation shows. On .NET 10 an `OpenApiSecuritySchemeReference` constructed
+there does not resolve and serialises as `"security": [{}]` — dotnet/aspnetcore#64524, closed
+as a duplicate of microsoft/OpenAPI.NET#2300 and marked by design. The failure is silent in
+the worst way: the page renders, the *Authorize* button appears, and no request ever carries
+the header. A document transformer holds the real `OpenApiDocument`, so references built
+there resolve.
+
+Two smaller traps in the same code, both silent:
+
+- Endpoint metadata is matched on `IAuthorizeData` / `IAllowAnonymous`, not on
+  `AuthorizeAttribute` / `AllowAnonymousAttribute`. Every route here is configured fluently
+  on a group, which contributes metadata implementing the interfaces rather than the
+  attributes themselves.
+- `ApiDescription.RelativePath` keeps route constraints (`resources/{id:guid}`) while the
+  document keys paths without them (`/resources/{id}`). Matching the two raw skipped every
+  parameterised route — four of the nine protected operations — and left them looking
+  anonymous in the reference while still returning 401.
+
+**Responses are described with metadata rather than typed results.** Every handler returns
+`IResult`, so the generated document had request bodies and almost no responses: the 409 on
+`POST /reservations` is the demo, and it was missing. `Produces` and `ProducesProblem`
+annotations fix that without touching a single handler body or status code. Converting the
+handlers to `Results<Created<T>, ProblemHttpResult, …>` would infer the same information,
+but it rewrites the return type and switch expression of every handler for a documentation
+benefit, and this project's booking path is the last place to take avoidable churn.
+
+**Four tests, because every one of these failures is invisible locally.** The fixture runs
+under `ASPNETCORE_ENVIRONMENT=Testing`, which is what makes "the document is served outside
+Development" a real check rather than a tautology. They were verified by reintroducing the
+route-constraint bug and confirming the suite fails and names all four affected operations.
+>>>>>>> docs/browsable-api

@@ -23,6 +23,12 @@
     inside the container*. The working tree is never modified, so the committed state
     cannot accidentally be left un-skipped.
 
+    Only useful while that test is committed skipped, which it no longer is - the exclusion
+    constraint landed and it runs with the rest of the suite. Left in place because it is
+    the mechanism for the next test committed failing-first, and because it refuses rather
+    than silently no-ops when there is no Skip to strip. Reproducing Finding A now means
+    reverting the constraint migration, not passing this flag.
+
 .PARAMETER KeepResults
     Copies the container's TestResults directory out to ./TestResults before the container
     is removed, and forces the trx logger on so there is something to copy.
@@ -38,7 +44,7 @@
     ./scripts/dev-test.ps1
     ./scripts/dev-test.ps1 -Task build
     ./scripts/dev-test.ps1 -Task ci        # rehearses the GitHub Actions sequence
-    ./scripts/dev-test.ps1 -Unskip -Filter Fifty_concurrent -Repeat 5
+    ./scripts/dev-test.ps1 -Filter Fifty_concurrent -Repeat 5
     ./scripts/dev-test.ps1 -KeepResults    # then read TestResults/*.trx for the server-side exception
 #>
 [CmdletBinding()]
@@ -80,7 +86,7 @@ New-Item -ItemType Directory -Path $work -Force | Out-Null
 $filterArg = ''
 if ($Filter -ne '') { $filterArg = "--filter 'FullyQualifiedName~$Filter'" }
 
-$unskipBlock = '# (running with the Finding A test skipped, as committed)'
+$unskipBlock = '# (running the suite as committed - nothing is skipped)'
 
 if ($Unskip) {
     $unskipBlock = @"
