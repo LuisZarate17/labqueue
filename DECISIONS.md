@@ -200,24 +200,46 @@ the process fresh. It was first mistaken for test flakiness. It is not: the same
 returned to a real caller under real contention, and it has been in the deployed API since
 the constraint landed.
 
-### Retry, on the context
+### `EnableRetryOnFailure` — tried, measured, rejected
 
-`EnableRetryOnFailure`, configured once on the `DbContext` rather than around the one call
-site. Same reasoning that rejected advisory locks in section 1: correctness every write path
-has to remember is correctness that will eventually be forgotten. The objection that sank
-`SERIALIZABLE` — pricing the whole application for one path — does not apply, because a
-retry policy costs nothing on requests that do not fail.
+The obvious fix is EF Core's own resiliency: add `EnableRetryOnFailure` to `UseNpgsql`, let
+the victim retry, done. It was implemented that way first. It made the failure worse, and
+the reason is a granularity mismatch worth recording.
 
-The retried insert runs against a settled table, so it resolves definitively: it either wins
-the slot or loses it to `23P01` and takes the existing `409` path. That is what makes the
-concurrency test green again, and it is worth being precise about why. Mapping `40P01` to
-`409` without retrying would also have removed the `500`, and would have been worse than
-useless: fifty callers would each be told the slot was taken while nothing was booked.
+**EF Core's execution strategy retries `SaveChangesAsync`, not the operation around it.** So
+every deadlock victim goes straight back to the `INSERT`, without re-reading, and re-contends
+on the same constraint. Fifty of them do that together, on a short backoff, repeatedly. The
+lock queue stops draining.
 
-EF Core's execution strategy applies to every `SaveChangesAsync` in the application. That is
-safe here because no code path opens an explicit transaction — a retrying strategy requires
-user-initiated transactions to be wrapped in `CreateExecutionStrategy().ExecuteAsync(...)`,
-and there are none to wrap.
+Measured, at five retries and a 250ms cap, against the same test:
+
+| | without retry | with `EnableRetryOnFailure` |
+|---|---|---|
+| failing statement | `40P01` after 1,002ms (`deadlock_timeout`) | timeout after **30,008ms** (`CommandTimeout`) |
+| deadlocks in the run | 99 | 14 |
+| reservations committed | 0 | 0 |
+| test duration | 30s | **1m 40s**, ending in a client-side timeout |
+
+A fast deadlock storm became a slow lock convoy. Tuning the retry count and backoff moves
+the numbers around; it does not fix the shape, because the retry is aimed at the wrong unit
+of work.
+
+### Retry the booking, not the save
+
+`BookAsync` catches `40P01` itself and retries a bounded number of times, and each attempt
+**re-reads before it re-inserts**. That single difference is what makes it work: by the time
+a victim wakes, the winner has usually committed, so the re-read finds the overlapping row
+and the victim returns `409` *without touching the constraint again*. The herd drains
+instead of re-forming. Only a victim that finds the window still free goes back to the
+`INSERT`. Delays are jittered so fifty victims do not wake in step.
+
+It is worth being precise about why retrying at all is necessary. Mapping `40P01` to a
+status code without retrying would also have removed the `500` — and would have been worse
+than useless: in a cascade, all fifty callers would be told the booking failed while the slot
+sat empty and nothing was booked.
+
+This also keeps the blast radius at one method. A retry policy on the context would have
+changed the failure behaviour of every write path in the application to fix one of them.
 
 ### A deadlock is not a conflict
 
@@ -243,6 +265,9 @@ existing `23P01` clause would not have caught it — the clause is typed on
 ### What this cost
 
 Nothing at the schema level: no migration, no change to the constraint, no change to the
-five booking rules. The fix is a retry policy, one catch clause, one status code and one
-counter. The constraint was right. Its failure handling was incomplete, and the test that
-proved the constraint was also the thing that eventually found the gap.
+five booking rules, and no change to any write path but this one. A bounded retry inside
+`BookAsync`, one catch clause, one status code and one counter.
+
+The constraint was right. Its failure handling was incomplete, the test that proved the
+constraint was also the thing that found the gap, and the first fix attempted for it was
+wrong in a way only the same test could show.

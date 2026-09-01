@@ -36,10 +36,13 @@ take a clean `23P01` exclusion violation. Sometimes the waiters form a cycle ins
 Postgres kills them as deadlocks — `40P01` — which the error path did not handle, so they
 came back as `500`s. One captured run: **99 deadlocks, zero exclusion violations, nothing
 committed.** Found by this project's own concurrency test, roughly one full-suite run in
-twenty, and live in the deployed API from the day the constraint landed. The fix is a retry
-policy, so the victim re-runs against a settled table and resolves properly; a deadlock that
-survives the retries now returns `503` and not a `409`, because the transaction was killed
-before it could establish whether the slot was free. [`DECISIONS.md` §7](DECISIONS.md).
+twenty, and live in the deployed API from the day the constraint landed. The fix is a bounded
+retry inside the booking path that **re-reads before it re-inserts**, so a victim normally
+finds the winner's row and returns `409` without re-contending — EF Core's
+`EnableRetryOnFailure` was tried first and made it worse, turning a 1s deadlock storm into a
+30s lock convoy, because it retries the save rather than the operation. A deadlock that
+survives the retries returns `503`, not `409`: the transaction was killed before it could
+establish whether the slot was free. [`DECISIONS.md` §7](DECISIONS.md).
 
 **Finding B** — the availability query filters on `resource_id` **and** on whether a
 reservation overlaps a window. EF Core's foreign-key index covers the first half only, so

@@ -9,7 +9,6 @@ using LabQueue.Core.Services;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
-using Npgsql;
 using Serilog;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -19,27 +18,15 @@ builder.Host.UseSerilog((context, services, configuration) => configuration
     .ReadFrom.Services(services)
     .Enrich.FromLogContext());
 
-// Retry is configured on the context rather than around the one call site that needs it,
-// for the reason advisory locks were rejected in DECISIONS.md: correctness that every write
-// path has to remember is correctness that will eventually be forgotten. Unlike SERIALIZABLE
-// — rejected for pricing the whole application to fix one path — a retry policy costs
-// nothing on the requests that do not fail.
-//
-// 40P01 is what makes this necessary. Fifty callers contending for one slot mostly resolve
-// as exclusion violations, but Postgres sometimes resolves that contention as a deadlock
-// instead, and the victim's transaction is gone. Retrying gives it a second attempt against
-// a settled table, where it either wins the slot or loses it cleanly to 23P01.
-//
-// 40P01 is already in Npgsql's transient set; naming it here is documentation, not a fix.
+// Deliberately no EnableRetryOnFailure. It was tried for the 40P01 deadlock described in
+// DECISIONS.md section 7 and made things measurably worse: EF Core's execution strategy
+// retries SaveChangesAsync alone, so fifty deadlock victims all re-attempt the INSERT and
+// re-contend on the same constraint every few hundred milliseconds. The lock queue stops
+// draining, and commands that used to fail in 1s at deadlock_timeout instead sat until the
+// 30s CommandTimeout. Retrying the booking operation, which re-reads before it re-inserts,
+// is what ReservationService.BookAsync does instead.
 builder.Services.AddDbContext<LabQueueDbContext>(options =>
-    options.UseNpgsql(
-        builder.Configuration.GetConnectionString("LabQueue"),
-        npgsql => npgsql.EnableRetryOnFailure(
-            maxRetryCount: 5,
-            // The default backoff reaches 30s. A booking request that has already lost a
-            // deadlock should re-contend in milliseconds or give up, not park a connection.
-            maxRetryDelay: TimeSpan.FromMilliseconds(250),
-            errorCodesToAdd: [PostgresErrorCodes.DeadlockDetected])));
+    options.UseNpgsql(builder.Configuration.GetConnectionString("LabQueue")));
 
 builder.AddLabQueueObservability();
 

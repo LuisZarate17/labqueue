@@ -94,7 +94,37 @@ the .trx with it, in its finally block. This capture required a throwaway runner
 the container. `-KeepResults` was added to dev-test.ps1 afterwards so the next occurrence
 of anything like this is readable without one.
 
+The first fix made it worse
+---------------------------
+EF Core's EnableRetryOnFailure was tried first (maxRetryCount 5, maxRetryDelay 250ms). Its
+execution strategy retries SaveChangesAsync alone, so every deadlock victim went straight
+back to the INSERT without re-reading, and fifty of them re-contended on the constraint in
+waves. Captured on run 14 of a 25-run verification loop:
+
+  14 SqlState: 40P01
+
+  Command failures, by duration (top 5) — no longer deadlock_timeout, now CommandTimeout:
+  18 Failed executing DbCommand (30,008ms)
+  16 Failed executing DbCommand (30,009ms)
+  12 Failed executing DbCommand (30,010ms)
+  8 Failed executing DbCommand (30,018ms)
+  7 Failed executing DbCommand (30,005ms)
+
+  [xUnit.net 00:01:50.88]     LabQueue.Tests.ConcurrentBookingTests.Fifty_concurrent_bookings_for_one_slot_yield_exactly_one_reservation [FAIL]
+    Failed LabQueue.Tests.ConcurrentBookingTests.Fifty_concurrent_bookings_for_one_slot_yield_exactly_one_reservation [1 m 40 s]
+    Error Message:
+     System.Threading.Tasks.TaskCanceledException : The operation was canceled.
+  ---- System.Net.Http.HttpRequestException : Error while copying content to a stream.
+  -------- System.IO.IOException : 
+  ------------ System.IO.IOException : The client aborted the request.
+
+  Zero reservations committed, zero 23P01, and the run took 1m40s against 30s for the
+  original failure — the 100s client timeout on HttpClient. A fast deadlock storm became a
+  slow lock convoy.
+
 Fix
 ---
-EnableRetryOnFailure on the DbContext, plus a catch matching 40P01 anywhere in the exception
-chain that returns 503 with Retry-After. See DECISIONS.md section 7.
+A bounded retry inside ReservationService.BookAsync that re-reads before it re-inserts, so a
+victim normally finds the winner's row and returns 409 without touching the constraint again.
+Jittered delays, three attempts, and 503 with Retry-After if they are exhausted. No
+EnableRetryOnFailure, and no change to any other write path. See DECISIONS.md section 7.
