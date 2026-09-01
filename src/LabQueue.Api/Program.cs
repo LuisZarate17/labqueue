@@ -109,8 +109,19 @@ app.MapScalarApiReference("/docs", options => options
 
 // The landing route exists so a stranger who clicks the live URL lands on something that
 // tells them how to use it, rather than a 404.
-app.MapGet("/", (IConfiguration configuration) =>
+//
+// A browser gets sent to /docs instead. The JSON below is the useful answer for a terminal
+// and useless for a human, and the bare host is the URL people actually paste — so serving
+// the same body to both put the reference one undiscoverable hop away. Negotiated on Accept
+// rather than redirecting outright, because the JSON is still the machine-readable entry
+// point and curl should keep getting it.
+app.MapGet("/", (IConfiguration configuration, HttpRequest request) =>
 {
+    if (request.Headers.Accept.Any(h => h is not null && h.Contains("text/html", StringComparison.OrdinalIgnoreCase)))
+    {
+        return Results.Redirect("/docs");
+    }
+
     var demo = configuration.GetSection(DemoOptions.SectionName).Get<DemoOptions>() ?? new DemoOptions();
 
     // Only the member account is ever published. Creating maintenance windows is an admin

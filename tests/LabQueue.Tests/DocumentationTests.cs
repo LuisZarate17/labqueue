@@ -126,6 +126,30 @@ public class DocumentationTests(LabQueueApiFixture fixture) : IClassFixture<LabQ
         Assert.Equal(HttpStatusCode.OK, (await fixture.Anonymous.GetAsync(documentUrl)).StatusCode);
     }
 
+
+    [Fact]
+    public async Task The_root_sends_a_browser_to_the_docs_and_leaves_a_terminal_its_json()
+    {
+        // The bare host is the URL people paste, and a browser landing on JSON puts the
+        // reference one undiscoverable hop away. curl keeps the JSON: it is the useful
+        // answer there, and the landing document is the machine-readable entry point.
+        // The client follows redirects, so this asserts where a browser ends up rather than
+        // the 302 itself - which is the behaviour that matters.
+        using var browser = new HttpRequestMessage(HttpMethod.Get, "/");
+        browser.Headers.Add("Accept", "text/html,application/xhtml+xml");
+        var landed = await fixture.Anonymous.SendAsync(browser);
+
+        Assert.Equal(HttpStatusCode.OK, landed.StatusCode);
+        Assert.Equal("text/html", landed.Content.Headers.ContentType?.MediaType);
+        Assert.StartsWith("/docs", landed.RequestMessage!.RequestUri!.AbsolutePath);
+
+        using var terminal = new HttpRequestMessage(HttpMethod.Get, "/");
+        terminal.Headers.Add("Accept", "*/*");
+        var json = await fixture.Anonymous.SendAsync(terminal);
+
+        Assert.Equal(HttpStatusCode.OK, json.StatusCode);
+        Assert.Equal("application/json", json.Content.Headers.ContentType?.MediaType);
+    }
     private async Task<JsonDocument> GetDocumentAsync()
         => JsonDocument.Parse(await fixture.Anonymous.GetStringAsync(DocumentPath));
 }
