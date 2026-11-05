@@ -211,7 +211,7 @@ smell reviewers notice.
 ```
 src/LabQueue.Api     minimal API endpoints, JWT auth, validation, OpenTelemetry
 src/LabQueue.Core    entities, DbContext, migrations, ReservationService
-tests/LabQueue.Tests xUnit + Testcontainers — 34!()
+tests/LabQueue.Tests xUnit + Testcontainers — 34!
  tests against real Postgres
 ```
 
