@@ -154,6 +154,47 @@ free Postgres, which is deleted at day 30 without warning.
 
 ## Architecture
 
+```mermaid
+flowchart LR
+    client(["Client<br/><small>Scalar /docs · curl · k6</small>"])
+    api["<b>LabQueue.Api</b><br/><small>ASP.NET Core minimal APIs<br/>JWT · validation · Problem Details</small>"]
+    svc["<b>ReservationService</b><br/><small>LabQueue.Core<br/>resource · window · certification<br/>maintenance · overlap</small>"]
+    pg[("<b>PostgreSQL 17</b><br/><small>reservations_no_overlap<br/>GiST exclusion constraint</small>")]
+    ok(["201 Created"])
+    taken(["409 Conflict"])
+    retry{"retries<br/>left?"}
+    busy(["503 Retry later"])
+    otel["Grafana Cloud<br/><small>OpenTelemetry</small>"]
+
+    client -->|"HTTP + JWT"| api
+    api --> svc
+    svc -->|"INSERT"| pg
+    pg -->|"committed"| ok
+    pg -->|"23P01 overlap"| taken
+    pg -->|"40P01 deadlock"| retry
+    retry -->|"yes · re-read"| svc
+    retry -->|"no · after 3"| busy
+    api -.->|"OTLP"| otel
+
+    classDef client fill:#e2e8f0,stroke:#475569,color:#0f172a
+    classDef app fill:#ede9fe,stroke:#7c3aed,color:#2e1065
+    classDef db fill:#dbeafe,stroke:#2563eb,color:#172554,stroke-width:2px
+    classDef ok fill:#dcfce7,stroke:#16a34a,color:#14532d
+    classDef warn fill:#fef3c7,stroke:#d97706,color:#78350f
+    classDef err fill:#fee2e2,stroke:#dc2626,color:#7f1d1d
+    classDef ext fill:#ffedd5,stroke:#ea580c,color:#7c2d12
+    classDef decision fill:#fef9c3,stroke:#ca8a04,color:#713f12
+
+    class client client
+    class api,svc app
+    class pg db
+    class ok ok
+    class taken warn
+    class busy err
+    class otel ext
+    class retry decision
+```
+
 Two projects plus tests. No deeper layering — onion-architecting seven phases of work is a
 smell reviewers notice.
 
@@ -204,7 +245,21 @@ Everything runs in containers. The API image is the same one that gets deployed.
 ```bash
 cp .env.example .env             # then set Jwt__Key to 32+ bytes
 docker compose up -d db          # database first
-./scripts/db-migrate.ps1 -Target local
+```
+
+Apply the migrations. On macOS or Linux:
+
+```bash
+dotnet tool install --global dotnet-ef --version "10.*"
+export ConnectionStrings__LabQueue="Host=localhost;Port=5432;Database=labqueue;Username=labqueue;Password=labqueue_dev"
+export Jwt__Key="design-time-only-key-not-used-to-sign-anything-0123456789"
+dotnet ef database update --project src/LabQueue.Core --startup-project src/LabQueue.Api
+```
+
+On Windows, `./scripts/db-migrate.ps1 -Target local` does the same inside the SDK container
+(Smart App Control blocks freshly built assemblies on the host). Then start the API:
+
+```bash
 docker compose up -d --build api
 ```
 
@@ -231,8 +286,10 @@ docker run --rm -i --network labqueue_default \
   grafana/k6 run /scripts/availability.js      # or race.js
 ```
 
-`scripts/gate02.sh` runs 24 HTTP checks against a running instance, and
-`scripts/dev-test.ps1` runs the xUnit suite against a real Postgres via Testcontainers.
+`scripts/gate02.sh` runs 24 HTTP checks against a running instance. Run the xUnit suite
+with `dotnet test labqueue.slnx` — Docker must be running, since Testcontainers starts a real
+Postgres. On Windows with Smart App Control, `scripts/dev-test.ps1` runs the same suite
+inside the SDK container.
 
 ## Why the load tests do not run against the hosted instance
 
