@@ -168,7 +168,7 @@ free Postgres, which is deleted at day 30 without warning.
 flowchart LR
     client(["Client<br/><small>Scalar /docs · curl · k6</small>"])
     api["<b>LabQueue.Api</b><br/><small>ASP.NET Core minimal APIs<br/>JWT · validation · Problem Details</small>"]
-    svc["<b>ReservationService</b><br/><small>LabQueue.Core<br/>resource · window · certification<br/>maintenance · overlap</small>"]
+    svc["<b>ReservationService</b><br/><small>LabQueue.Core<br/>resource · window · certification<br/>maintenance · overlap<br/>one booking per resource at a time</small>"]
     pg[("<b>PostgreSQL 17</b><br/><small>reservations_no_overlap<br/>GiST exclusion constraint</small>")]
     ok(["201 Created"])
     taken(["409 Conflict"])
@@ -178,7 +178,7 @@ flowchart LR
 
     client -->|"HTTP + JWT"| api
     api --> svc
-    svc -->|"INSERT"| pg
+    svc -->|"row lock · re-check · INSERT"| pg
     pg -->|"committed"| ok
     pg -->|"23P01 overlap"| taken
     pg -->|"40P01 deadlock"| retry
@@ -211,7 +211,8 @@ smell reviewers notice.
 ```
 src/LabQueue.Api     minimal API endpoints, JWT auth, validation, OpenTelemetry
 src/LabQueue.Core    entities, DbContext, migrations, ReservationService
-tests/LabQueue.Tests xUnit + Testcontainers — 32 tests against real Postgres
+tests/LabQueue.Tests xUnit + Testcontainers — 33![Uploading image.png…]()
+ tests against real Postgres
 ```
 
 Three endpoint groups — `/auth`, `/resources`, `/reservations` — plus admin routes for
