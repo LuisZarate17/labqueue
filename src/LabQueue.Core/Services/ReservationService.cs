@@ -85,6 +85,8 @@ public sealed class ReservationService(LabQueueDbContext db)
                 + $"{maintenance.During.LowerBound:u} to {maintenance.During.UpperBound:u}.");
         }
 
+        // Unlocked, and only a fast path: a slot that is already taken is refused here without
+        // queueing for the resource's lock. The check that counts is repeated under the lock.
         if (await FindOverlapAsync(resourceId, during, ct) is { } conflict)
         {
             return BookingResult.Rejected(
@@ -103,73 +105,100 @@ public sealed class ReservationService(LabQueueDbContext db)
             CreatedAt = DateTime.UtcNow
         };
 
-        db.Reservations.Add(reservation);
-
         for (var attempt = 0; ; attempt++)
         {
-            try
+            // Lock, re-check and insert are one transaction, so the lock is held until the
+            // insert commits or rolls back and the next booking for this resource cannot read
+            // the slot in between. Declared with a block rather than a using declaration so
+            // that a deadlock victim's transaction is rolled back, releasing its locks, before
+            // the backoff below rather than after it.
+            await using (var transaction = await db.Database.BeginTransactionAsync(ct))
             {
-                await db.SaveChangesAsync(ct);
-                return BookingResult.Created(reservation);
-            }
-            catch (DbUpdateException e) when (e.InnerException is PostgresException
-            {
-                SqlState: PostgresErrorCodes.ExclusionViolation
-            })
-            {
-                // The overlap check above is a SELECT followed by an INSERT with nothing
-                // holding the gap. A concurrent caller can pass the same check and insert
-                // first, so the check being clean does not mean the slot is still free by the
-                // time this row lands. reservations_no_overlap is what actually enforces it;
-                // this branch reports the loss the same way the check above would have.
-                db.Entry(reservation).State = EntityState.Detached;
-
-                return BookingResult.Rejected(
-                    BookingOutcome.ReservationConflict,
-                    $"Resource {resource.Code} was booked for an overlapping window by another "
-                    + "request while this one was in flight.");
-            }
-            catch (Exception e) when (IsDeadlock(e))
-            {
-                // Postgres resolves contention on reservations_no_overlap as an exclusion
-                // violation most of the time, but under enough simultaneous inserters the
-                // wait-for graph cycles and it kills some of them as deadlock victims instead.
-                // A victim learns nothing about the slot: it was aborted before it could find
-                // out whether the window was taken.
-                db.Entry(reservation).State = EntityState.Detached;
-
-                if (attempt == MaximumDeadlockAttempts)
+                try
                 {
-                    return BookingResult.Rejected(
-                        BookingOutcome.DeadlockAborted,
-                        $"The booking for {resource.Code} could not be confirmed because too "
-                        + "many requests were competing for that window. The slot may still be "
-                        + "free; retry the request.");
+                    await LockResourceAsync(resourceId, ct);
+
+                    // Every attempt re-reads under the lock, and that includes a deadlock
+                    // victim's retry: the re-read before re-insert is what lets a victim find
+                    // the winner and leave without contending again (DECISIONS.md section 7).
+                    // Under READ COMMITTED this statement takes a fresh snapshot after the lock
+                    // is granted, so it sees whatever the previous holder committed.
+                    if (await FindOverlapAsync(resourceId, during, ct) is { } winner)
+                    {
+                        return BookingResult.Rejected(
+                            BookingOutcome.ReservationConflict,
+                            $"Resource {resource.Code} is already booked from "
+                            + $"{winner.During.LowerBound:u} to {winner.During.UpperBound:u}.");
+                    }
+
+                    db.Reservations.Add(reservation);
+                    await db.SaveChangesAsync(ct);
+                    await transaction.CommitAsync(ct);
+                    return BookingResult.Created(reservation);
                 }
-
-                // Jittered, so fifty victims do not wake together and rebuild the pile-up
-                // they were just released from.
-                await Task.Delay(Random.Shared.Next(20, 60) * (attempt + 1), ct);
-
-                // Re-read before re-inserting, and this is the whole point of retrying here
-                // rather than through EF Core's execution strategy. That retries
-                // SaveChangesAsync alone, so every victim goes straight back to the INSERT and
-                // contends again; measured, it turned a 1s deadlock storm into a lock convoy
-                // that ran into the 30s command timeout. Nearly every victim finds the winner's
-                // row here and leaves without touching the constraint, which is what lets the
-                // contention actually drain.
-                if (await FindOverlapAsync(resourceId, during, ct) is { } winner)
+                catch (DbUpdateException e) when (e.InnerException is PostgresException
                 {
+                    SqlState: PostgresErrorCodes.ExclusionViolation
+                })
+                {
+                    // The lock serialises bookings that come through here; it does not make the
+                    // check above authoritative. reservations_no_overlap is still what enforces
+                    // the rule, against every writer including ones that never take the lock,
+                    // and this branch reports its refusal the same way the check would have.
+                    db.Entry(reservation).State = EntityState.Detached;
+
                     return BookingResult.Rejected(
                         BookingOutcome.ReservationConflict,
-                        $"Resource {resource.Code} is already booked from "
-                        + $"{winner.During.LowerBound:u} to {winner.During.UpperBound:u}.");
+                        $"Resource {resource.Code} was booked for an overlapping window by another "
+                        + "request while this one was in flight.");
                 }
-
-                db.Reservations.Add(reservation);
+                catch (Exception e) when (IsDeadlock(e))
+                {
+                    // With the lock in place bookings for one resource no longer meet at the
+                    // constraint, so this should not fire from contention between them. It is
+                    // kept unchanged for anything that does still deadlock - a writer outside
+                    // this path, or a lock order nobody has thought of yet. A victim learns
+                    // nothing about the slot: it was aborted before it could find out whether
+                    // the window was taken.
+                    db.Entry(reservation).State = EntityState.Detached;
+                }
             }
+
+            if (attempt == MaximumDeadlockAttempts)
+            {
+                return BookingResult.Rejected(
+                    BookingOutcome.DeadlockAborted,
+                    $"The booking for {resource.Code} could not be confirmed because too "
+                    + "many requests were competing for that window. The slot may still be "
+                    + "free; retry the request.");
+            }
+
+            // Jittered, so victims do not wake together and rebuild the pile-up they were
+            // just released from.
+            await Task.Delay(Random.Shared.Next(20, 60) * (attempt + 1), ct);
         }
     }
+
+    /// <summary>
+    /// Takes a row lock on the resource for the rest of the current transaction, so bookings
+    /// for one resource run their check and insert one at a time while bookings for other
+    /// resources are untouched.
+    ///
+    /// This is contention control, not the guarantee. Without it, simultaneous inserts for
+    /// one slot all reach reservations_no_overlap at once; each waits on the others, and once
+    /// those waits form cycles Postgres can only break about one per deadlock_timeout. With
+    /// nothing committed, every victim's re-read finds the slot still free and it re-inserts,
+    /// so the queue never drains (DECISIONS.md section 9).
+    ///
+    /// FOR NO KEY UPDATE rather than FOR UPDATE because the foreign-key check on every insert
+    /// referencing this row takes FOR KEY SHARE, which FOR UPDATE would block and FOR NO KEY
+    /// UPDATE does not. A row lock rather than pg_advisory_xact_lock because the lock is then
+    /// the resource's own row: no hashing a uuid into a bigint key space where two resources
+    /// could collide, and it shows up as an ordinary row lock wait for anyone reading pg_locks.
+    /// </summary>
+    private Task LockResourceAsync(Guid resourceId, CancellationToken ct)
+        => db.Database.ExecuteSqlAsync(
+            $"SELECT 1 FROM resources WHERE id = {resourceId} FOR NO KEY UPDATE", ct);
 
     private Task<Reservation?> FindOverlapAsync(Guid resourceId, NpgsqlRange<DateTime> during, CancellationToken ct)
         => db.Reservations.FirstOrDefaultAsync(

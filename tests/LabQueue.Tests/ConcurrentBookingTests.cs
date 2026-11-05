@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net;
 using LabQueue.Tests.Infrastructure;
+using Microsoft.EntityFrameworkCore;
 
 namespace LabQueue.Tests;
 
@@ -19,6 +20,10 @@ namespace LabQueue.Tests;
 /// partial GiST exclusion constraint — not the SELECT above, which still cannot see a
 /// concurrent uncommitted INSERT. BookAsync catches the exclusion violation and reports it as
 /// the same conflict the check would have.
+///
+/// BookAsync now also takes a row lock on the resource before it checks and inserts, so these
+/// fifty requests queue rather than meeting at the constraint all at once - that pile-up could
+/// deadlock and never drain (DECISIONS.md section 9). The constraint is still the guarantee.
 /// </summary>
 public class ConcurrentBookingTests(LabQueueApiFixture fixture) : IClassFixture<LabQueueApiFixture>
 {
@@ -133,5 +138,46 @@ public class ConcurrentBookingTests(LabQueueApiFixture fixture) : IClassFixture<
              """;
 
         Assert.True(created == 1 && conflicted == Attempts - 1 && confirmed == 1, detail);
+    }
+
+    /// <summary>
+    /// BookAsync takes a row lock on the resource before it checks for an overlap and inserts,
+    /// so bookings for one resource queue instead of piling onto reservations_no_overlap
+    /// together (DECISIONS.md section 9). This pins down both halves of that: a booking waits
+    /// behind another transaction holding its resource's row, and a booking for a different
+    /// resource does not wait at all.
+    ///
+    /// Without the lock this fails on the first half. A plain INSERT's foreign-key check takes
+    /// FOR KEY SHARE on the resources row, which FOR NO KEY UPDATE does not block, so the
+    /// booking for the held resource would go straight through.
+    /// </summary>
+    [Fact]
+    public async Task A_booking_waits_for_its_own_resource_and_not_for_any_other()
+    {
+        var held = await fixture.CreateResourceAsync();
+        var other = await fixture.CreateResourceAsync();
+
+        await fixture.WithDbAsync(async db =>
+        {
+            await using var transaction = await db.Database.BeginTransactionAsync();
+            await db.Database.ExecuteSqlAsync(
+                $"SELECT 1 FROM resources WHERE id = {held} FOR NO KEY UPDATE");
+
+            using (var unrelated = await LabQueueApiFixture
+                       .BookAsync(fixture.Member, other, Start, End)
+                       .WaitAsync(TimeSpan.FromSeconds(10)))
+            {
+                Assert.Equal(HttpStatusCode.Created, unrelated.StatusCode);
+            }
+
+            var queued = LabQueueApiFixture.BookAsync(fixture.Member, held, Start, End);
+            var first = await Task.WhenAny(queued, Task.Delay(TimeSpan.FromSeconds(1)));
+            Assert.False(first == queued, "The booking for the held resource did not wait for its lock.");
+
+            await transaction.RollbackAsync();
+
+            using var released = await queued.WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.Equal(HttpStatusCode.Created, released.StatusCode);
+        });
     }
 }
