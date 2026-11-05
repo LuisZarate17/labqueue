@@ -15,15 +15,25 @@
 //     -v "$PWD/loadtest:/scripts" -v "$PWD/docs/findings:/out" \
 //     -e BASE_URL=http://api:8080 \
 //     grafana/k6 run /scripts/race.js --summary-export=/out/NAME.json
+//
+// Optional knobs, all off by default so the plain command above is the original race:
+//   RESOURCES=N             spread the VUs round-robin over N resources instead of one.
+//                           RESOURCES=50 gives every VU its own resource, so nothing should
+//                           conflict and the latency shows whether unrelated bookings wait
+//                           on each other.
+//   WINDOW_OFFSET_HOURS=H   pin the window instead of deriving it from the clock, so
+//                           back-to-back runs inside one minute each get a fresh window.
 
 import http from 'k6/http';
 import { Counter } from 'k6/metrics';
 
 const BASE = __ENV.BASE_URL || 'http://api:8080';
 const VUS = Number(__ENV.VUS || 50);
+const RESOURCES = Number(__ENV.RESOURCES || 1);
 
 export const created = new Counter('bookings_created');
 export const conflicted = new Counter('bookings_conflicted');
+export const unavailable = new Counter('bookings_unavailable');
 export const other = new Counter('bookings_other');
 
 export const options = {
@@ -32,16 +42,23 @@ export const options = {
       executor: 'per-vu-iterations',
       vus: VUS,
       iterations: 1,
-      maxDuration: '1m',
+      // Long enough to see a request outlive HttpClient's 100s default rather than have k6
+      // cut it off at its own 60s and report it as a generic failure.
+      maxDuration: '3m',
     },
   },
+  // Not a pass/fail gate. Declaring it is what makes k6 report the booking requests' own
+  // latency, separate from the setup's register, login and resource list.
+  thresholds: { 'http_req_duration{name:book}': ['max>=0'] },
 };
 
 // A window past the end of the seed (2025-09-01 .. 2027-09-01), shifted by the current
 // minute so every run gets a window nothing has booked. Reusing a window would hand every
 // VU a legitimate 409, which looks exactly like the fix working.
 function freshWindow() {
-  const offsetHours = Math.floor(Date.now() / 60000) % 20000;
+  const offsetHours = __ENV.WINDOW_OFFSET_HOURS !== undefined
+    ? Number(__ENV.WINDOW_OFFSET_HOURS)
+    : Math.floor(Date.now() / 60000) % 20000;
   const from = Date.UTC(2028, 0, 1) + offsetHours * 3600 * 1000;
   return { from: new Date(from).toISOString(), to: new Date(from + 2 * 3600 * 1000).toISOString() };
 }
@@ -66,33 +83,41 @@ export function setup() {
   if (login.status !== 200) throw new Error(`login failed: ${login.status} ${login.body}`);
   const token = login.json('token');
 
-  // An active resource with no certification gate, so rule 3 cannot mask the result.
+  // Active resources with no certification gate, so rule 3 cannot mask the result.
   const list = http.get(`${BASE}/resources?take=200`, {
     headers: { Authorization: `Bearer ${token}` },
   });
-  const resource = list.json().find((r) => r.status === 'active' && !r.requiredCertification);
-  if (!resource) throw new Error('no ungated active resource found — is the seed loaded?');
+  const resourceIds = list.json()
+    .filter((r) => r.status === 'active' && !r.requiredCertification)
+    .slice(0, RESOURCES)
+    .map((r) => r.id);
+  if (resourceIds.length < RESOURCES) {
+    throw new Error(`found ${resourceIds.length} ungated active resources, need ${RESOURCES} — is the seed loaded?`);
+  }
 
   const win = freshWindow();
 
   // One token for all fifty VUs. PBKDF2 at 100k iterations is tens of milliseconds; logging
   // in per VU would stagger the requests by far more than the race window is wide.
-  console.log(`race target  resource=${resource.id}  from=${win.from}  to=${win.to}`);
-  return { token, resourceId: resource.id, ...win };
+  console.log(`race target  resources=${resourceIds.length} (first ${resourceIds[0]})  from=${win.from}  to=${win.to}`);
+  return { token, resourceIds, ...win };
 }
 
 export default function (data) {
+  const resourceId = data.resourceIds[(__VU - 1) % data.resourceIds.length];
   const res = http.post(
     `${BASE}/reservations`,
-    JSON.stringify({ resourceId: data.resourceId, from: data.from, to: data.to }),
+    JSON.stringify({ resourceId, from: data.from, to: data.to }),
     {
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${data.token}` },
       tags: { name: 'book' },
+      timeout: '120s',
     },
   );
 
   if (res.status === 201) created.add(1);
   else if (res.status === 409) conflicted.add(1);
+  else if (res.status === 503) unavailable.add(1);
   else {
     other.add(1);
     console.error(`unexpected ${res.status}: ${res.body}`);
@@ -100,5 +125,5 @@ export default function (data) {
 }
 
 export function teardown(data) {
-  console.log(`race done   resource=${data.resourceId}  window=${data.from} .. ${data.to}`);
+  console.log(`race done   resources=${data.resourceIds.length}  window=${data.from} .. ${data.to}`);
 }

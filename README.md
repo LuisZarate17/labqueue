@@ -46,6 +46,16 @@ finds the winner's row and returns `409` without re-contending — EF Core's
 survives the retries returns `503`, not `409`: the transaction was killed before it could
 establish whether the slot was free. [`DECISIONS.md` §7](DECISIONS.md).
 
+**Nor was the retry.** It assumed a deadlock victim wakes to find the winner's row. In one CI
+run there was no winner: all fifty inserts were waiting on each other, each victim's re-read
+found the slot still free and went straight back into the queue, and requests ran to 100s —
+21 `500`s, 16 `503`s, nothing booked. The same jam showed up locally in 2 of 30 k6 races.
+Bookings now take a row lock on their resource before they check and insert, so requests for
+one slot queue instead of piling onto the constraint together: 30 of 30 races clean, zero
+deadlocks, worst case 200 ms instead of 113 s, while bookings for different resources still
+run side by side. The constraint is untouched and is still the guarantee — the lock only
+decides how fast contention clears. [`DECISIONS.md` §9](DECISIONS.md).
+
 **Finding B** — the availability query filters on `resource_id` **and** on whether a
 reservation overlaps a window. EF Core's foreign-key index covers the first half only, so
 the plan found all 2,454 reservations for the resource and discarded 2,431 of them in a

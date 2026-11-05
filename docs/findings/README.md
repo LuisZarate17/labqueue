@@ -57,14 +57,19 @@ full-suite run in twenty, and never when run alone, because a single test class 
 process fresh. It reproduced at `29ef497`, so it was not introduced by any later work. It
 had been live in the deployed API since the constraint landed.
 
-**Fix** — `EnableRetryOnFailure` on the context, so the deadlock victim re-runs against a
-settled table and resolves definitively; plus a catch that matches `40P01` anywhere in the
+**Fix** — a bounded retry inside `BookAsync` that re-reads before it re-inserts
+(`EnableRetryOnFailure` was tried first and made it worse); plus a catch that matches `40P01` anywhere in the
 exception chain and returns `503` with `Retry-After`. Not `409`: the victim was killed before
 it could establish whether the window was taken, and `reservations.conflicts.total` must keep
 meaning "the overlap check rejected a booking".
 
 Detail: [finding-a-prime-deadlock.txt](finding-a-prime-deadlock.txt) ·
 reasoning in [`DECISIONS.md` §7](../../DECISIONS.md)
+
+**Then the retry jammed** — with no winner committed, victims re-inserted into the same queue
+(CI: 100s, 21 × `500`, 16 × `503`); a per-resource row lock in front of the constraint took
+`race.js` from 2 jammed runs in 30, 321 deadlocks and a 113 s max to 30 clean, 0 and 200 ms —
+[`DECISIONS.md` §9](../../DECISIONS.md).
 
 ---
 

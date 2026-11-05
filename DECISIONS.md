@@ -170,7 +170,6 @@ inner loop — and the container path pre-validates the Linux image that gets de
 
 ---
 
-<<<<<<< HEAD
 ## 7. The exclusion constraint needed a retry policy to be complete
 
 **Context.** Section 1 chose an exclusion constraint and ended there, as though the write
@@ -272,7 +271,9 @@ five booking rules, and no change to any write path but this one. A bounded retr
 The constraint was right. Its failure handling was incomplete, the test that proved the
 constraint was also the thing that found the gap, and the first fix attempted for it was
 wrong in a way only the same test could show.
-=======
+
+---
+
 ## 8. Browsable docs, served in Production
 
 **Context.** The gate for this project was "a stranger can complete a booking through the
@@ -330,4 +331,111 @@ benefit, and this project's booking path is the last place to take avoidable chu
 under `ASPNETCORE_ENVIRONMENT=Testing`, which is what makes "the document is served outside
 Development" a real check rather than a tautology. They were verified by reintroducing the
 route-constraint bug and confirming the suite fails and names all four affected operations.
->>>>>>> docs/browsable-api
+
+---
+
+## 9. A per-resource lock in front of the constraint
+
+**Context.** Section 7's retry re-reads before it re-inserts, on the stated assumption that
+by the time a victim wakes "the winner has usually committed". CI run `41938598602`, on a
+commit that changed only the README, hit the case where there is no winner. From the server
+log captured in that run's `.trx`:
+
+| | |
+|---|---|
+| requests | 50, and not one answered `201` or `409` |
+| failed `INSERT` attempts | 129: 108 deadlock victims (`40P01`), 21 command timeouts at 30s |
+| lock wait before a `40P01` | median 26.9s; 97 of 108 had waited 10s or more, 3 died at ~1s |
+| outcomes | 21 × `500` (the timeouts), 16 × `503` after four deadlocks each at 85–99s, and 13 still on their fourth `INSERT` when the test's `HttpClient` gave up at 100s |
+
+**Why it does not drain.** Each inserter places its entry in the constraint's index and then
+waits for every in-flight inserter it overlaps, so fifty simultaneous inserts all wait on one
+another. Postgres checks a waiter for deadlock once, `deadlock_timeout` after it starts
+waiting, and kills one transaction per cycle it finds. A waiter whose check found no cycle is
+not checked again, so cycles that form later are broken only when some newer waiter's check
+closes them — which is the 26.9s median above. Meanwhile nothing commits, so a victim's
+re-read finds the slot still free and it inserts again, back into the same queue. That is the
+lock convoy section 7 measured for `EnableRetryOnFailure` — 30s timeouts, 1m40s, a client-side
+timeout — reached by the retry that replaced it, whenever the first round produces no winner.
+
+It reproduces locally with `loadtest/race.js`: 2 of 30 runs (numbers below). The README change
+did not cause it; it was a slower runner landing on a timing that had always been possible.
+
+**Decision.** Each booking attempt is now one explicit transaction: lock the resource's row,
+re-check for an overlap, insert, commit.
+
+```sql
+SELECT 1 FROM resources WHERE id = $1 FOR NO KEY UPDATE
+```
+
+Bookings for one resource pass through one at a time. Under `READ COMMITTED` the re-check
+takes a fresh snapshot after the lock is granted, so it sees the previous holder's committed
+row and returns `409` without the insert ever reaching the constraint. Bookings for different
+resources lock different rows and do not wait on each other.
+
+**A row lock, not `pg_advisory_xact_lock`.** An advisory key is a `bigint` — section 1's
+sketch used `hashtext`, which is 32 bits — so a uuid has to be hashed down, and two resources
+whose keys collide would silently queue behind each other. The resource's row is its own key:
+nothing to hash, no key space shared with anything else, and a waiter shows up in `pg_locks`
+as an ordinary row-lock wait on `resources` rather than an opaque number. The cost is that a
+row lock records the locker in the tuple, so each booking dirties the resource's heap page,
+where an advisory lock lives only in shared memory. Next to the insert it guards, that is noise.
+
+**`FOR NO KEY UPDATE`, not `FOR UPDATE`.** Every insert into a table that references
+`resources` runs a foreign-key check that takes `FOR KEY SHARE` on the referenced row — the
+booking's own insert, and also an admin creating a maintenance window. `FOR UPDATE` conflicts
+with `FOR KEY SHARE`; `FOR NO KEY UPDATE` does not. So bookings queue behind bookings and
+nothing else does. An `UPDATE` of the resource row itself, such as retiring it, does wait — for
+the few milliseconds of whichever booking holds the lock.
+
+**Why section 1's objection does not apply.** Section 1 rejected advisory locks because
+correctness would then live in application code: one write path that forgets the lock, and
+double bookings come back silently. That objection is to a lock *as the guarantee*. This one
+is not. `reservations_no_overlap` is unchanged and still refuses an overlapping insert from
+every writer, and `BookAsync` still handles `23P01` and `40P01` exactly as section 7 left it.
+A writer that skips the lock loses only the contention control — its worst case is section
+7's behaviour, never a double booking. The lock decides how quickly contention clears; the
+constraint still decides whether an overlap can exist.
+
+**Measured.** `loadtest/race.js` against docker-compose, 50 VUs per run, each run on a fresh
+window. "One resource" is the original race; "fifty resources" gives every VU its own
+resource, so nothing conflicts and the latency shows whether unrelated bookings wait.
+
+| one resource, 30 runs | before | after |
+|---|---|---|
+| runs ending 1 × `201`, 49 × `409` | 28 | **30** |
+| `503` / `500` | 55 / 43 | **0 / 0** |
+| deadlocks (`40P01`, from the API log) | 321 | **0** |
+| booking p95, median run | 15.9 ms | 35.3 ms |
+| booking p95, worst run | 111,679 ms | **198 ms** |
+| booking max | 113,132 ms | **200 ms** |
+
+| fifty resources, 10 runs | before | after |
+|---|---|---|
+| `201` | 500 of 500 | 500 of 500 |
+| booking p95, median run | 10.7 ms | 14.1 ms |
+| booking p95, worst run | 19.4 ms | 19.6 ms |
+| booking max | 20.2 ms | 20.0 ms |
+
+The two jammed runs before the change are the CI failure on a developer machine: one `201`,
+no `409`s at all, and the other 49 answered after 110s with a mix of `503` and timeout `500`.
+After it, no booking reached `reservations_no_overlap` in either batch — not one `23P01` in the
+API log — because every loser's re-check under the lock found the winner first.
+
+The cost is on the contended slot, and it is the point: fifty bookings for one window now
+queue, so the typical p95 roughly doubles, from 16 ms to 35 ms, in exchange for a worst case
+of 200 ms instead of 113 s. On distinct resources the typical p95 rises by about 3 ms — the
+transaction's extra round trips, `BEGIN`, the lock and `COMMIT` — and the worst case does not
+move. Had unrelated bookings been queueing behind each other, that batch would look like the
+contended one.
+
+The Finding A concurrency test passed 50 of 50 consecutive runs with the change. A second
+test holds one resource's row lock from outside and checks both halves: a booking for that
+resource waits for it, and a booking for another resource does not. It fails without the
+change, because a plain insert's foreign-key check takes `FOR KEY SHARE`, which
+`FOR NO KEY UPDATE` does not block.
+
+**What this does not change.** The reservation-versus-maintenance race in section 1's known
+boundary is still open; it spans two tables and this lock does not touch it. An Npgsql command
+timeout inside `BookAsync` is still an unhandled `500`; with bookings queued it no longer
+comes from booking contention, and it is left alone here.
